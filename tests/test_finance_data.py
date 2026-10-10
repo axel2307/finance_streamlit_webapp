@@ -164,6 +164,53 @@ def test_missing_ambiguous_or_invalid_dates_are_rejected(date_index):
         extract_close_prices(as_download(close), ["AAPL", "MSFT"])
 
 
+@pytest.mark.parametrize("values", [
+    pytest.param([1, 2, 3, 4], id="integers"),
+    pytest.param([1.5, 2.5, 3.5, 4.5], id="floats"),
+    pytest.param([pd.Timestamp("2026-10-01"), 2, pd.Timestamp("2026-10-05"), pd.Timestamp("2026-10-06")], id="dates-and-integer"),
+    pytest.param([pd.Timestamp("2026-10-01"), 2.5, pd.Timestamp("2026-10-05"), pd.Timestamp("2026-10-06")], id="dates-and-float"),
+])
+def test_object_index_with_numbers_is_rejected_before_date_conversion(values):
+    """Numeric labels must not turn into invented nanosecond dates in 1970."""
+    close = close_fixture()
+    close.index = pd.Index(values, dtype=object)
+    with pytest.raises(DataError, match="date|row numbers"):
+        extract_close_prices(as_download(close), ["AAPL", "MSFT"])
+    with pytest.raises(DataError, match="date|row numbers"):
+        prepare_returns(close)
+
+
+@pytest.mark.parametrize("representation", ["object-text", "string-text", "date-objects", "timestamp-objects"])
+def test_non_datetime_date_index_preserves_prices_returns_and_csv(representation):
+    """Valid date representations still identify the original observations."""
+    expected_prices = close_fixture()
+    close = expected_prices.copy()
+    dates = expected_prices.index
+    if representation == "object-text":
+        close.index = pd.Index(dates.strftime("%Y-%m-%d"), dtype=object)
+    elif representation == "string-text":
+        close.index = pd.Index(dates.strftime("%Y-%m-%d"), dtype="string")
+    elif representation == "date-objects":
+        close.index = pd.Index(dates.date, dtype=object)
+    else:
+        close.index = pd.Index(dates.tolist(), dtype=object)
+
+    extracted = extract_close_prices(as_download(close), ["AAPL", "MSFT"])
+    assert isinstance(extracted.index, pd.DatetimeIndex)
+    assert extracted.index.name == "Date"
+    assert extracted.index.tolist() == dates.tolist()
+    pd.testing.assert_frame_equal(extracted, expected_prices, check_freq=False, check_index_type=False)
+
+    result = prepare_returns(extracted)
+    expected_returns = pd.DataFrame(
+        {"AAPL": [0.10, 0.01, 0.02], "MSFT": [0.05, 0.03, -0.02]},
+        index=pd.DatetimeIndex(["2026-10-02", "2026-10-05", "2026-10-06"], name="Date"),
+    )
+    pd.testing.assert_frame_equal(result, expected_returns, check_freq=False, check_index_type=False)
+    exported = pd.read_csv(StringIO(result.to_csv(index=True)), index_col="Date", parse_dates=True)
+    pd.testing.assert_frame_equal(exported, expected_returns, check_freq=False, check_index_type=False)
+
+
 def test_nonfinite_computed_returns_are_rejected():
     close = close_fixture()
     close["AAPL"] = [1e-308, 1e308, 1e308, 1e308]

@@ -307,6 +307,59 @@ def test_unavailable_treasury_yield_stops_cleanly(offline_app, failure):
     assert_valid_downloads_remain_available(app)
 
 
+@pytest.mark.parametrize("layout", ["multiindex", "plain", "nested"])
+def test_ambiguous_treasury_columns_preserve_valid_price_and_return_csvs(offline_app, layout):
+    create_app, responses, calls = offline_app
+    yield_data = treasury_yield(layout=layout)
+    responses["yield"] = pd.concat([yield_data, yield_data], axis=1)
+    if layout == "nested":
+        responses["yield"].columns = pd.MultiIndex.from_tuples([
+            ("Close", "^TNX", "a"), ("Close", "^TNX", "b"),
+        ])
+    prices = market_prices(["AAPL", "MSFT"])
+    responses["prices"] = prices
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+
+    assert_no_portfolio_results(app)
+    assert "The Treasury yield (^TNX) is unavailable. Please try again later." in [
+        element.value for element in app.error
+    ]
+    assert calls[-1]["tickers"] == "^TNX"
+    assert_valid_downloads_remain_available(app)
+    expected_returns = prices["Close"].pct_change(fill_method=None).dropna()
+    pd.testing.assert_frame_equal(
+        downloaded_returns(app), expected_returns, check_freq=False, check_names=False,
+    )
+    price_links = [element.value for element in app.markdown if "Download Time Series" in element.value]
+    assert len(price_links) == 1
+    match = re.search(r'base64,([^\"]+)"', price_links[0])
+    assert match is not None
+    price_csv = pd.read_csv(
+        StringIO(base64.b64decode(match.group(1)).decode()),
+        index_col="Date", parse_dates=["Date"],
+    )
+    pd.testing.assert_frame_equal(
+        price_csv, prices["Close"], check_freq=False, check_names=False,
+    )
+
+
+@pytest.mark.parametrize("symbols", [["NA"], ["AAPL", "MSFT"]])
+def test_object_numeric_price_dates_stop_before_export(offline_app, symbols):
+    create_app, responses, calls = offline_app
+    prices = market_prices(symbols)
+    prices.index = pd.Index(range(1, len(prices) + 1), dtype=object)
+    responses["prices"] = prices
+    app = select_and_go(create_app(), symbols)
+
+    assert_no_portfolio_results(app)
+    assert "Closing prices must have dates, not row numbers." in [
+        element.value for element in app.error
+    ]
+    assert len(calls) == 1
+    assert not any("Download" in element.value for element in app.markdown)
+    assert not responses["plots"]
+
+
 @pytest.mark.parametrize("symbols", [["NA"], ["AAPL", "MSFT"]])
 def test_empty_price_download_stops_cleanly(offline_app, symbols):
     create_app, responses, calls = offline_app
