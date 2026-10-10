@@ -1,6 +1,7 @@
 """Parse market directories and prepare dated prices without filling missing data."""
 
 from io import BytesIO, StringIO
+from numbers import Number
 
 import numpy as np
 import pandas as pd
@@ -87,7 +88,9 @@ def _validated_prices(close):
     if close.columns.has_duplicates:
         raise DataError("Closing prices contain duplicate asset columns.")
     if not isinstance(close.index, pd.DatetimeIndex):
-        if pd.api.types.is_numeric_dtype(close.index.dtype):
+        if pd.api.types.is_numeric_dtype(close.index.dtype) or any(
+            isinstance(value, Number) for value in close.index
+        ):
             raise DataError("Closing prices must have dates, not row numbers.")
         try:
             dates = pd.to_datetime(close.index, errors="raise")

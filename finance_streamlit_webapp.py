@@ -40,13 +40,15 @@ def download_data(label, **kwargs):
 
 
 def read_treasury_yield(data):
-    if 'Close' not in data.columns:
+    if data.columns.has_duplicates or 'Close' not in data.columns:
         raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
     close = data['Close']
     if isinstance(close, pd.DataFrame):
         if '^TNX' not in close.columns:
             raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
         close = close['^TNX']
+    if not isinstance(close, pd.Series):
+        raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
     valid = pd.to_numeric(close, errors='coerce').dropna()
     if valid.empty or not np.isfinite(valid.iloc[-1]) or valid.iloc[-1] <= -100:
         raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
