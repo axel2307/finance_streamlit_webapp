@@ -7,7 +7,7 @@ This module deliberately does not choose an annualization or rate convention.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import linprog, minimize
 
 
 class PortfolioError(ValueError):
@@ -116,24 +116,110 @@ def portfolio_metrics(weights, mean_returns, covariance, risk_free_rate):
     return _metrics(_weights(weights, len(means)), means, scaled, scale, excess)
 
 
+def _unconstrained_minimum(cov, equality, targets):
+    """Equality-constrained minimum in whitened coordinates; also a risk bound."""
+    factor = np.linalg.cholesky(cov)
+    whitened = np.linalg.solve(factor, equality.T).T
+    row_scales = np.linalg.norm(whitened, axis=1)
+    if not np.isfinite(row_scales).all() or np.min(row_scales) <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    normalized = whitened / row_scales[:, None]
+    minimum, _, rank, _ = np.linalg.lstsq(normalized, targets / row_scales, rcond=None)
+    if rank != len(targets):
+        raise PortfolioError(_SOLVER_ERROR)
+    return np.linalg.solve(factor.T, minimum), float(np.linalg.norm(minimum))
+
+
+def _certify_optimality(cov, solution, equality, targets):
+    """Check relative primal/dual KKT errors for any number of equalities."""
+    gradient = cov @ solution
+    quadratic = float(solution @ gradient)
+    gradient_scale = float(np.max(np.abs(gradient)))
+    if not np.isfinite([quadratic, gradient_scale]).all() or min(quadratic, gradient_scale) <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    active = solution > np.finfo(float).eps * len(solution) * np.max(solution)
+    tolerance = 2e-6
+
+    def valid(multiplier):
+        dual_gradient = equality.T @ multiplier
+        reduced = gradient - dual_gradient
+        scale = max(gradient_scale, float(np.max(np.abs(dual_gradient))))
+        # No absolute floor: even a very small objective must have small
+        # *relative* complementarity and primal/dual gap.
+        return (
+            np.isfinite(reduced).all()
+            and np.min(reduced) >= -tolerance * scale
+            and np.sum(np.abs(solution * reduced)) <= tolerance * quadratic
+            and abs(quadratic - float(targets @ multiplier)) <= tolerance * quadratic
+        )
+
+    multiplier, _, rank, _ = np.linalg.lstsq(equality[:, active].T, gradient[active], rcond=None)
+    if valid(multiplier):
+        return
+    if rank == len(targets):
+        raise PortfolioError(_SOLVER_ERROR)
+    # At a frontier vertex the active equality rows can be dependent; the
+    # multiplier is then not unique. Seek a feasible dual certificate instead
+    # of treating the arbitrary minimum-norm multiplier as the only one.
+    normalized_gradient = gradient / gradient_scale
+    dual = linprog(
+        np.zeros(len(targets)),
+        A_ub=np.vstack((equality.T, -equality[:, active].T)),
+        b_ub=np.r_[normalized_gradient + 1e-9, -normalized_gradient[active] + 1e-9],
+        bounds=[(None, None)] * len(targets),
+        method="highs",
+        options={"dual_feasibility_tolerance": 1e-9, "primal_feasibility_tolerance": 1e-9},
+    )
+    if not dual.success or not np.isfinite(dual.x).all() or not valid(dual.x * gradient_scale):
+        raise PortfolioError(_SOLVER_ERROR)
+
+
 def _quadratic_minimum(cov, equality, targets, initial, *, simplex=True):
-    """Solve a scaled convex QP and reject unsuccessful or infeasible results."""
+    """Solve in risk units, with an objective scale derived from this QP."""
     equality = np.atleast_2d(np.asarray(equality, dtype=float))
     targets = np.atleast_1d(np.asarray(targets, dtype=float))
     initial = np.asarray(initial, dtype=float)
     count = len(initial)
+    deviations = np.sqrt(np.diag(cov))
+    correlation = cov / np.outer(deviations, deviations)
+    risk_equality = equality / deviations
+    try:
+        unconstrained, _ = _unconstrained_minimum(correlation, risk_equality, targets)
+    except np.linalg.LinAlgError as exc:
+        raise PortfolioError(_SOLVER_ERROR) from exc
+    unconstrained_original = unconstrained / deviations
+    if (
+        np.min(unconstrained_original) >= 0
+        and (not simplex or np.max(unconstrained_original) <= 1)
+        and np.max(np.abs(equality @ unconstrained_original - targets)) <= _FEASIBILITY_TOL
+    ):
+        initial = unconstrained_original
+    # x_i = (risk_scale / sigma_i) * z_i. Correlation preconditions each
+    # variable. Scale to a feasible portfolio's risk after using the exact
+    # unconstrained solution when it is long-only. Using the unconstrained
+    # risk as the scale when it requires shorts can instead create enormous
+    # objectives on a high-return, long-only frontier point.
+    initial_risk_units = deviations * initial
+    risk_scale = float(np.sqrt(initial_risk_units @ correlation @ initial_risk_units))
+    if not np.isfinite(risk_scale) or risk_scale <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    transform = risk_scale / deviations
+    transformed_equality = equality * transform
+    row_scales = np.linalg.norm(transformed_equality, axis=1)
+    transformed_equality = transformed_equality / row_scales[:, None]
+    transformed_targets = targets / row_scales
     constraints = {
         "type": "eq",
-        "fun": lambda x: equality @ x - targets,
-        "jac": lambda x: equality,
+        "fun": lambda z: transformed_equality @ z - transformed_targets,
+        "jac": lambda z: transformed_equality,
     }
     try:
         result = minimize(
-            lambda x: 0.5 * float(x @ cov @ x),
-            initial,
-            jac=lambda x: cov @ x,
+            lambda z: 0.5 * float(z @ correlation @ z),
+            initial / transform,
+            jac=lambda z: correlation @ z,
             method="SLSQP",
-            bounds=[(0, 1 if simplex else None)] * count,
+            bounds=[(0, 1 / value if simplex else None) for value in transform],
             constraints=constraints,
             options={"ftol": 1e-12, "maxiter": 1000},
         )
@@ -142,14 +228,19 @@ def _quadratic_minimum(cov, equality, targets, initial, *, simplex=True):
     if not getattr(result, "success", False):
         raise PortfolioError(_SOLVER_ERROR)
     try:
-        solution = np.asarray(result.x, dtype=float)
+        transformed_solution = np.asarray(result.x, dtype=float)
         objective = float(result.fun)
     except (AttributeError, TypeError, ValueError, OverflowError) as exc:
         raise PortfolioError(_SOLVER_ERROR) from exc
     if (
-        solution.shape != (count,)
-        or not np.isfinite(solution).all()
+        transformed_solution.shape != (count,)
+        or not np.isfinite(transformed_solution).all()
         or not np.isfinite(objective)
+    ):
+        raise PortfolioError(_SOLVER_ERROR)
+    solution = transformed_solution * transform
+    if (
+        not np.isfinite(solution).all()
         or np.min(solution) < -_FEASIBILITY_TOL
         or (simplex and np.max(solution) > 1 + _FEASIBILITY_TOL)
     ):
@@ -160,22 +251,10 @@ def _quadratic_minimum(cov, equality, targets, initial, *, simplex=True):
     solution = _weights(solution, count) if simplex else np.maximum(solution, 0)
     if np.max(np.abs(equality @ solution - targets)) > _FEASIBILITY_TOL:
         raise PortfolioError(_SOLVER_ERROR)
-    if not np.isfinite(solution @ cov @ solution):
+    final_transformed = solution / transform
+    if np.max(np.abs(transformed_equality @ final_transformed - transformed_targets)) > _FEASIBILITY_TOL:
         raise PortfolioError(_SOLVER_ERROR)
-    if len(targets) == 1:
-        # For min-variance (sum(w)=1) and the transformed Sharpe QP
-        # (a.y=1), the equality multiplier is x.T @ C @ x. Check the
-        # convex problem's KKT conditions as well as the success flag.
-        gradient = cov @ solution
-        quadratic = float(solution @ gradient)
-        reduced_gradient = gradient - quadratic * equality[0]
-        gradient_scale = max(1.0, float(np.max(np.abs(gradient))),
-                             abs(quadratic) * float(np.max(np.abs(equality[0]))))
-        if (
-            np.min(reduced_gradient) < -1e-6 * gradient_scale
-            or np.max(np.abs(solution * reduced_gradient)) > 1e-6 * max(1.0, abs(quadratic))
-        ):
-            raise PortfolioError(_SOLVER_ERROR)
+    _certify_optimality(correlation, final_transformed, transformed_equality, transformed_targets)
     return solution
 
 
@@ -183,7 +262,9 @@ def _minimum_variance(cov):
     count = len(cov)
     if count == 1:
         return np.ones(1)
-    return _quadratic_minimum(cov, np.ones(count), [1], np.full(count, 1 / count))
+    initial = np.zeros(count)
+    initial[int(np.argmin(np.diag(cov)))] = 1
+    return _quadratic_minimum(cov, np.ones(count), [1], initial)
 
 
 def _maximum_sharpe(cov, excess):
@@ -202,7 +283,8 @@ def _maximum_sharpe(cov, excess):
     if not np.isfinite(normalized_excess).all():
         raise PortfolioError("The asset return scales cannot be optimized reliably.")
     initial = np.zeros(count)
-    initial[int(np.argmax(excess))] = 1
+    best_vertex = int(np.argmax(excess / np.sqrt(np.diag(cov))))
+    initial[best_vertex] = 1 / normalized_excess[best_vertex]
     solution = _quadratic_minimum(
         cov, normalized_excess, [1], initial, simplex=False
     )

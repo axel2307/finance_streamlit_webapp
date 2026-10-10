@@ -56,6 +56,9 @@ normalized formula could return a portfolio that did not maximize Sharpe.
   of NaN results or an unhandled inverse-matrix exception. At least two common
   returns are necessary, but are not sufficient for an invertible covariance.
 - Solver results must satisfy convergence, finiteness and portfolio constraints.
+  Per-asset risk scaling and a feasible-portfolio objective scale prevent small
+  variances from being hidden by absolute stopping tolerances. Relative
+  optimality checks also cover frontier points with different expected returns.
   Equal expected returns produce a single minimum-variance frontier point.
   All nonpositive excess returns are handled explicitly rather than applying the
   positive-excess tangency formula with an invalid normalization.

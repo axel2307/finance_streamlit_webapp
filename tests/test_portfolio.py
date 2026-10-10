@@ -1,6 +1,7 @@
 """Financial regressions with controlled data; no provider calls."""
 
 from types import SimpleNamespace
+from itertools import permutations
 
 import numpy as np
 import pytest
@@ -180,7 +181,12 @@ def test_feasible_but_suboptimal_solver_success_is_rejected(monkeypatch, stage):
         result = real_minimize(function, initial, **kwargs)
         is_positive_sharpe = kwargs["bounds"][0][1] is None
         if is_positive_sharpe == (stage == "positive_sharpe"):
-            result.x = np.asarray(initial).copy()
+            # Construct a feasible but suboptimal vertex in the solver's
+            # transformed coordinates; its initial point may already be exact.
+            equality = kwargs["constraints"]["jac"](initial)
+            target = equality @ initial
+            result.x = np.zeros_like(initial)
+            result.x[0] = target[0] / equality[0, 0]
             result.fun = function(result.x)
             result.success = True
         return result
@@ -193,3 +199,75 @@ def test_feasible_but_suboptimal_solver_success_is_rejected(monkeypatch, stage):
 def test_metrics_reject_weights_outside_shared_long_only_policy(weights):
     with pytest.raises(PortfolioError):
         portfolio_metrics(weights, [0.001, 0.002], np.eye(2), 0)
+
+
+@pytest.mark.parametrize("order", list(permutations(range(3))))
+def test_disparate_variances_recover_exact_minimum_and_sharpe(order):
+    # Regression: a globally scaled covariance allowed success at [0.5,0.5,0]
+    # with over five times the minimum risk and missed the Sharpe optimum.
+    variances = np.array([1e-10, 1e-8, 1.0])[list(order)]
+    inverse = 1 / variances
+    expected = inverse / inverse.sum()
+    expected_risk = np.sqrt(1 / inverse.sum())
+    result = optimize_portfolio([0.001] * 3, np.diag(variances), 0)
+    np.testing.assert_allclose(result.min_weights, expected, rtol=2e-7, atol=1e-15)
+    np.testing.assert_allclose(result.weights, expected, rtol=2e-7, atol=1e-15)
+    assert result.min_risk == pytest.approx(expected_risk, rel=1e-9)
+    assert result.max_risk == pytest.approx(expected_risk, rel=1e-9)
+    assert result.max_sharpe == pytest.approx(0.001 / expected_risk, rel=1e-9)
+    np.testing.assert_allclose(result.frontier_risks, [expected_risk], rtol=1e-9)
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 0, 1)])
+def test_disparate_risks_and_distinct_means_match_analytic_frontier(order):
+    order = list(order)
+    variances = np.array([1e-10, 1e-8, 1.0])[order]
+    means = np.array([0.001, 0.002, 0.003])[order]
+    covariance = np.diag(variances)
+    result = optimize_portfolio(means, covariance, 0, points=5)
+    expected_sharpe_weights = means / variances
+    expected_sharpe_weights /= expected_sharpe_weights.sum()
+    np.testing.assert_allclose(result.weights, expected_sharpe_weights, rtol=2e-7, atol=1e-14)
+    for weights, target, risk in zip(result.frontier_weights, result.frontier_returns, result.frontier_risks):
+        assert_feasible(weights)
+        assert weights @ means == pytest.approx(target, abs=1e-12)
+        # For 3 assets and two equalities, enumerate all possible supports.
+        # Each support's closed-form QP solution is an independent oracle.
+        candidates = []
+        for mask in range(1, 8):
+            support = np.flatnonzero([(mask >> i) & 1 for i in range(3)])
+            submeans = means[support]
+            if len(support) == 1:
+                if abs(submeans[0] - target) < 1e-12:
+                    candidates.append(variances[support[0]])
+                continue
+            rows = np.vstack((np.ones(len(support)), (submeans - 0.001) / 0.002))
+            rhs = np.array([1, (target - 0.001) / 0.002])
+            # Whiten columns to avoid using the same global-covariance scaling
+            # that caused the defect; solve the equality problem by SVD.
+            whitened = rows / np.sqrt(variances[support])
+            row_norm = np.linalg.norm(whitened, axis=1)
+            candidate = np.linalg.lstsq(whitened / row_norm[:, None], rhs / row_norm, rcond=None)[0]
+            original = candidate / np.sqrt(variances[support])
+            if np.min(original) >= -1e-9 and np.max(np.abs(rows @ original - rhs)) < 1e-8:
+                candidates.append(float(candidate @ candidate))
+        assert risk**2 == pytest.approx(min(candidates), rel=2e-6, abs=1e-18)
+
+
+def test_disparate_correlated_assets_match_closed_form_interior_solution():
+    deviations = np.array([1e-5, 1e-4, 1.0])
+    correlation = np.array([[1, -0.2, -0.1], [-0.2, 1, -0.15], [-0.1, -0.15, 1]])
+    covariance = correlation * np.outer(deviations, deviations)
+    inverse_risk = np.linalg.solve(correlation, 1 / deviations) / deviations
+    expected = inverse_risk / inverse_risk.sum()
+    assert np.min(expected) > 0
+    result = optimize_portfolio([0.001] * 3, covariance, 0)
+    np.testing.assert_allclose(result.min_weights, expected, rtol=2e-7, atol=1e-14)
+    np.testing.assert_allclose(result.weights, expected, rtol=2e-7, atol=1e-14)
+    assert result.min_risk == pytest.approx(np.sqrt(expected @ covariance @ expected), rel=1e-9)
+
+
+def test_relative_certificate_rejects_old_inaccurate_solution_at_tiny_objective():
+    covariance = np.diag([1e-10, 1e-8, 1.0])
+    with pytest.raises(PortfolioError, match="optimizer could not"):
+        portfolio._certify_optimality(covariance, np.array([0.5, 0.5, 0]), np.ones((1, 3)), np.array([1]))
