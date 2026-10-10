@@ -21,20 +21,21 @@ filenames = ('otherlisted.txt', 'nasdaqlisted.txt')
 filtro_etf = st.sidebar.radio("Asset Class", options= ("All" , "Stock", "ETF"))
 filtro_category = st.sidebar.radio("Exchange", options= ("All", "NASDAQ", "NYSE"))
 
-st.cache_resource()
+@st.cache_data(ttl=3600)
 def load_data():
 
-    ftp = FTP('ftp.nasdaqtrader.com')
-    ftp.login()
-    ftp.cwd(directory)
+    with FTP('ftp.nasdaqtrader.com', timeout=30) as ftp:
+        ftp.login()
+        ftp.cwd(directory)
 
-    for item in filenames:
-        ftp.retrbinary('RETR {0}'.format(item), open(item, 'wb').write)
+        for item in filenames:
+            with open(item, 'wb') as output:
+                ftp.retrbinary('RETR {0}'.format(item), output.write)
 
-    ftp.quit()
-
-    nasdaq_exchange_info = pd.read_csv('nasdaqlisted.txt',  sep='|')
-    other_exchange_info = pd.read_csv('otherlisted.txt',  sep='|')
+    # "NA" is a real ticker. Only empty CSV fields should become missing values.
+    csv_options = dict(sep='|', keep_default_na=False, na_values=[''])
+    nasdaq_exchange_info = pd.read_csv('nasdaqlisted.txt', **csv_options)
+    other_exchange_info = pd.read_csv('otherlisted.txt', **csv_options)
     nasdaq_exchange_info = nasdaq_exchange_info[nasdaq_exchange_info['Financial Status']=='N']
     nasdaq_exchange_info = nasdaq_exchange_info[nasdaq_exchange_info['Test Issue']=='N']
     nasdaq_exchange_info = nasdaq_exchange_info.drop(columns=['Test Issue', 'Financial Status', "Round Lot Size", "NextShares", "Market Category"])
@@ -47,7 +48,7 @@ def load_data():
     other_exchange_info = other_exchange_info[["Symbol", "Security Name", "ETF"]]
     other_exchange_info["Exchange"] = "Nyse"
     import_df = pd.concat([nasdaq_exchange_info, other_exchange_info])
-    return import_df
+    return import_df.dropna(subset=['Symbol', 'Security Name'])
 
 import_df = load_data()
 
@@ -73,7 +74,7 @@ if filtro_category != "All":
 serch_option = st.sidebar.radio("Serch by:", options=("Symbol", "Security Name"))
 
 # Sidebar - Stock selection
-sorted_stock_unique = sorted(df_filtrada[serch_option].astype(str).unique())
+sorted_stock_unique = sorted(df_filtrada[serch_option].dropna().astype(str).unique())
 selected_stock = st.sidebar.multiselect('Select Assets', sorted_stock_unique)
 
 
@@ -122,6 +123,9 @@ if st.sidebar.button("Go") :
         st.markdown("### Selected Assets")
         st.table(df_selected_stock)
         data_stocks = yf.download(tickers = ticker_list , period = time_delta, interval= intervalo)
+        if data_stocks.empty:
+            st.error("No price data is available for the selected assets and period. Try another selection or try again later.")
+            st.stop()
         
 
         
@@ -258,11 +262,17 @@ if st.sidebar.button("Go") :
             
 
             # Extraer el valor de 'Close' y conservar todos los decimales
-            if "Close" in ten_year_yield.columns and not ten_year_yield.empty:
-                annual_yield = float(ten_year_yield["Close"].iloc[0])  # Usar iloc[0] y convertir a float
-                
-            else:
-                st.error("Error: La columna 'Close' no está disponible o el DataFrame está vacío.")
+            if "Close" not in ten_year_yield.columns or ten_year_yield.empty:
+                st.error("The Treasury yield (^TNX) is unavailable. Please try again later.")
+                st.stop()
+            yield_close = ten_year_yield["Close"]
+            if isinstance(yield_close, pd.DataFrame):
+                yield_close = yield_close[ten_year]
+            valid_yields = yield_close.dropna()
+            if valid_yields.empty or not np.isfinite(valid_yields.iloc[-1]):
+                st.error("The Treasury yield (^TNX) is unavailable. Please try again later.")
+                st.stop()
+            annual_yield = float(valid_yields.iloc[-1])
 
             # Mapear intervalos a días
             days_mapping = {
