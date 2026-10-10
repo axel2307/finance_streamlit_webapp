@@ -39,3 +39,44 @@ The pandas 3 startup fix preserves the valid ticker `NA` when reading CSV and
 removes missing labels before sorting. The Treasury-yield calculation extracts a
 scalar explicitly, which is required for pandas 3 and yfinance's MultiIndex data.
 Direct dependencies are pinned to the versions used for this verification.
+
+## Validated portfolio behavior
+
+The analysis uses one **long-only** portfolio model: every weight is between 0
+and 1 and weights sum to 1. The weights table, metrics and maximum-Sharpe marker
+share the same validated solution. The previous unrestricted short-selling table
+has been removed because it used a different model from the chart and its
+normalized formula could return a portfolio that did not maximize Sharpe.
+
+- Returns retain every valid observation and its date. Missing prices are never
+  forward-filled; statistics use only returns observed for all selected assets.
+  Partial histories are accepted when the common sample supports the analysis.
+- Missing assets, invalid prices, insufficient common returns, and singular or
+  numerically unusable covariance matrices produce an explanatory error instead
+  of NaN results or an unhandled inverse-matrix exception. At least two common
+  returns are necessary, but are not sufficient for an invertible covariance.
+- Solver results must satisfy convergence, finiteness and portfolio constraints.
+  Per-asset risk scaling and a feasible-portfolio objective scale prevent small
+  variances from being hidden by absolute stopping tolerances. Relative
+  optimality checks also cover frontier points with different expected returns.
+  Equal expected returns produce a single minimum-variance frontier point.
+  All nonpositive excess returns are handled explicitly rather than applying the
+  positive-excess tangency formula with an invalid normalization.
+- Provider failures are handled at the FTP and yfinance boundaries. The cached
+  catalog is assembled in memory only after both transfers complete.
+- Exchange filters preserve Nasdaq's source market codes. NYSE is code `N`;
+  NYSE Arca, BATS, NYSE MKT and IEX are separate options when present. Unknown
+  codes retain an explicit `Unknown (code)` label.
+- The KDE is labeled as a distribution of **returns**, and return downloads
+  name the selected interval. Single-asset downloads and the literal ticker
+  `NA` remain supported.
+
+This repair does not change the existing current-`^TNX` proxy, days/365 rate
+conversion, or per-interval return/volatility/Sharpe convention. Historical-rate
+alignment, annualization and visual redesign remain separate product decisions.
+The app is educational and its estimates do not guarantee future performance.
+
+The regression suite covers the twelve reviewed defects: return retention and
+CSV dates (BUG01/02), usable data and covariance (BUG03/04), optimality and a shared
+long-only model (BUG05/06), solver failures and equal-mean frontiers (BUG07/08),
+provider errors (BUG09/10), KDE semantics (BUG11) and exchange identity (BUG12).

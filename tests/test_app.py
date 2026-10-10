@@ -2,7 +2,10 @@
 
 from itertools import product
 from pathlib import Path
+import base64
 import ftplib
+from io import StringIO
+import re
 
 import matplotlib
 
@@ -47,7 +50,7 @@ VALID_ASSETS = [
     ("NA", "Nano Labs Ltd", "Stock", "NASDAQ"),
     ("QQQ", "Invesco QQQ Trust", "ETF", "NASDAQ"),
     ("IBM", "International Business Machines", "Stock", "NYSE"),
-    ("SPY", "SPDR S&P 500 ETF Trust", "ETF", "NYSE"),
+    ("SPY", "SPDR S&P 500 ETF Trust", "ETF", "NYSE Arca"),
 ]
 
 
@@ -124,14 +127,38 @@ def offline_app(monkeypatch, tmp_path):
     st.cache_data.clear()
     st.cache_resource.clear()
     calls = []
-    responses = {"yield": treasury_yield(), "prices": None}
+    responses = {"yield": treasury_yield(), "prices": None, "plots": []}
+
+    # Keep rendering through Streamlit while retaining numeric chart evidence.
+    # Production closes figures after rendering, so capture the data at that boundary.
+    original_pyplot = st.pyplot
+
+    def capture_plot(figure=None, *args, **kwargs):
+        plotted = figure if hasattr(figure, "get_axes") else plt.gcf()
+        for axis in plotted.get_axes():
+            responses["plots"].append({
+                "title": axis.get_title(),
+                "xlabel": axis.get_xlabel(),
+                "ylabel": axis.get_ylabel(),
+                "collections": [
+                    {"label": item.get_label(), "offsets": np.asarray(item.get_offsets()).copy()}
+                    for item in axis.collections
+                ],
+            })
+        return original_pyplot(figure, *args, **kwargs)
+
+    monkeypatch.setattr(st, "pyplot", capture_plot)
 
     def download(*, tickers, period, interval, **kwargs):
         calls.append({"tickers": tickers, "period": period, "interval": interval})
         if tickers == "^TNX":
+            if isinstance(responses["yield"], Exception):
+                raise responses["yield"]
             return responses["yield"].copy()
         assert isinstance(tickers, list), "Unexpected market-data request"
         if responses["prices"] is not None:
+            if isinstance(responses["prices"], Exception):
+                raise responses["prices"]
             return responses["prices"].copy()
         return market_prices(tickers)
 
@@ -160,6 +187,33 @@ def select_and_go(app, symbols):
     return app
 
 
+def assert_no_portfolio_results(app):
+    assert_no_exception(app)
+    assert app.error, "Invalid input or a failed provider must be explained to the user"
+    assert not any("Sharpe Ratio" in table.value.columns for table in app.table)
+    assert not any("Portfolio Metrics" in element.value for element in app.markdown)
+    assert not any("Efficient Frontier and Portfolio Optimization" in element.value for element in app.markdown)
+
+
+def downloaded_returns(app, interval="1d"):
+    label = f"Download Returns ({interval})"
+    links = [element.value for element in app.markdown if label in element.value]
+    assert len(links) == 1, "Expose one returns CSV with the selected interval in its label"
+    match = re.search(r'base64,([^\"]+)"', links[0])
+    assert match is not None
+    csv_text = base64.b64decode(match.group(1)).decode()
+    result = pd.read_csv(StringIO(csv_text), index_col="Date", parse_dates=["Date"])
+    return result
+
+
+def assert_valid_downloads_remain_available(app, expected_return_rows=23):
+    assert any("Download Time Series" in element.value for element in app.markdown)
+    returns = downloaded_returns(app)
+    assert len(returns) == expected_return_rows
+    assert isinstance(returns.index, pd.DatetimeIndex)
+    assert np.isfinite(returns.to_numpy()).all()
+
+
 def test_startup_preserves_na_ticker_and_excludes_invalid_directory_rows(offline_app):
     create_app, _, calls = offline_app
     app = create_app()
@@ -173,7 +227,11 @@ def test_startup_preserves_na_ticker_and_excludes_invalid_directory_rows(offline
 
 @pytest.mark.parametrize(
     "asset_class,exchange,search_by",
-    list(product(["All", "Stock", "ETF"], ["All", "NASDAQ", "NYSE"], ["Symbol", "Security Name"])),
+    list(product(
+        ["All", "Stock", "ETF"],
+        ["All", "NASDAQ", "NYSE", "NYSE Arca"],
+        ["Symbol", "Security Name"],
+    )),
 )
 def test_filter_combinations(offline_app, asset_class, exchange, search_by):
     create_app, _, calls = offline_app
@@ -228,6 +286,7 @@ def test_two_assets_complete_with_scalar_treasury_yield(offline_app, layout):
     metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
     assert len(metrics) == 1
     assert np.isfinite(metrics[0][["Return", "Std Dev", "Sharpe Ratio"]].to_numpy()).all()
+    assert metrics[0].iloc[0]["Portfolio"] == "Long-only Max Sharpe Ratio"
 
 
 @pytest.mark.parametrize("failure", ["empty", "nan", "infinite", "missing_close"])
@@ -245,6 +304,7 @@ def test_unavailable_treasury_yield_stops_cleanly(offline_app, failure):
     assert app.error
     assert not any("Sharpe Ratio" in table.value.columns for table in app.table)
     assert not any("Efficient Frontier and Portfolio Optimization" in element.value for element in app.markdown)
+    assert_valid_downloads_remain_available(app)
 
 
 @pytest.mark.parametrize("symbols", [["NA"], ["AAPL", "MSFT"]])
@@ -257,3 +317,207 @@ def test_empty_price_download_stops_cleanly(offline_app, symbols):
     assert app.error
     assert len(calls) == 1
     assert not any("Download Time Series" in element.value for element in app.markdown)
+
+
+@pytest.mark.parametrize("interval", ["1d", "5d", "1mo", "3mo"])
+def test_returns_csv_retains_first_return_dates_and_interval(offline_app, interval):
+    """BUG01/02: every valid observation survives the app's actual CSV export."""
+    create_app, responses, _ = offline_app
+    prices = market_prices(["AAPL", "MSFT"])
+    responses["prices"] = prices
+    app = create_app()
+    app.sidebar.selectbox[1].set_value(interval)
+    app = select_and_go(app, ["AAPL", "MSFT"])
+
+    assert_no_exception(app)
+    assert not app.error
+    expected = prices["Close"].pct_change(fill_method=None).dropna()
+    actual = downloaded_returns(app, interval)
+    pd.testing.assert_frame_equal(actual, expected, check_freq=False, check_names=False)
+    assert actual.index.name == "Date"
+    assert actual.index[0] == prices.index[1]
+    assert len(actual) == len(prices) - 1
+
+
+def test_partial_prices_use_only_observed_adjacent_returns(offline_app):
+    """BUG03: one interior gap is allowed, without synthesizing a zero return."""
+    create_app, responses, _ = offline_app
+    prices = market_prices(["AAPL", "MSFT"])
+    prices.loc[prices.index[8], ("Close", "MSFT")] = np.nan
+    responses["prices"] = prices
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+
+    assert_no_exception(app)
+    assert not app.error
+    expected = prices["Close"].pct_change(fill_method=None).dropna()
+    actual = downloaded_returns(app)
+    pd.testing.assert_frame_equal(actual, expected, check_freq=False, check_names=False)
+    assert prices.index[8] not in actual.index
+    assert prices.index[9] not in actual.index
+    assert len(actual) == len(prices) - 3
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["one_price", "two_prices", "three_prices", "all_nan_asset", "no_overlap", "identical_series"],
+)
+def test_unusable_multiasset_data_stops_before_optimization(offline_app, case):
+    """BUG03/04: insufficient/common data and singular covariance are actionable errors."""
+    create_app, responses, _ = offline_app
+    prices = market_prices(["AAPL", "MSFT"])
+    if case == "one_price":
+        prices = prices.iloc[:1]
+    elif case == "two_prices":
+        prices = prices.iloc[:2]
+    elif case == "three_prices":
+        prices = prices.iloc[:3]
+    elif case == "all_nan_asset":
+        prices[("Close", "MSFT")] = np.nan
+    elif case == "no_overlap":
+        prices.loc[prices.index[:12], ("Close", "MSFT")] = np.nan
+        prices.loc[prices.index[12:], ("Close", "AAPL")] = np.nan
+    else:
+        prices[("Close", "MSFT")] = prices[("Close", "AAPL")]
+    responses["prices"] = prices
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+
+    assert_no_portfolio_results(app)
+    assert not any("Frontier" in plot["title"] for plot in responses["plots"])
+    if case in {"three_prices", "identical_series"}:
+        assert_valid_downloads_remain_available(app, expected_return_rows=len(prices) - 1)
+
+
+def test_weights_metrics_and_frontier_marker_describe_same_long_only_portfolio(offline_app):
+    """BUG06: rendered tables and the plotted star describe one feasible allocation."""
+    create_app, responses, _ = offline_app
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+    assert_no_exception(app)
+    assert not app.error
+
+    text_elements = list(app.markdown) + list(app.caption) + list(app.info)
+    assert any("Long-only: weights are between 0 and 1 and sum to 1." in item.value for item in text_elements)
+    weights_tables = [
+        element.value for element in list(app.dataframe) + list(app.table)
+        if "Opt Weight" in element.value.columns and "Symbol" in element.value.columns
+    ]
+    assert len(weights_tables) == 1
+    weights = weights_tables[0].set_index("Symbol")["Opt Weight"].reindex(["AAPL", "MSFT"]).to_numpy()
+    assert np.isfinite(weights).all()
+    assert (weights >= -1e-8).all() and (weights <= 1 + 1e-8).all()
+    assert weights.sum() == pytest.approx(1, abs=1e-8)
+
+    returns = downloaded_returns(app)
+    expected_return = float(weights @ returns.mean().to_numpy())
+    expected_risk = float(np.sqrt(weights @ returns.cov().to_numpy() @ weights))
+    # The established daily convention is preserved; this is not a methodology audit.
+    risk_free = (1 + 4.2 / 100) ** (1 / 365) - 1
+    metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
+    assert len(metrics) == 1
+    displayed = metrics[0].iloc[0]
+    assert displayed["Portfolio"] == "Long-only Max Sharpe Ratio"
+    assert displayed["Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
+    assert displayed["Std Dev"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
+    assert displayed["Sharpe Ratio"] == pytest.approx((expected_return - risk_free) / expected_risk, rel=1e-7)
+
+    markers = [
+        collection["offsets"] for plot in responses["plots"] for collection in plot["collections"]
+        if collection["label"] == "Max Sharpe Ratio Portfolio"
+    ]
+    assert len(markers) == 1
+    np.testing.assert_allclose(markers[0], [[expected_risk, expected_return]], rtol=1e-7, atol=1e-10)
+
+
+def test_optimizer_failure_is_explained_before_results(offline_app, monkeypatch):
+    """BUG07: the app honors an unsuccessful validation at the optimizer boundary."""
+    import portfolio
+
+    create_app, responses, _ = offline_app
+    message = "The optimizer did not converge. Try a different asset selection."
+
+    def failed_optimization(*args, **kwargs):
+        raise portfolio.PortfolioError(message)
+
+    monkeypatch.setattr(portfolio, "optimize_portfolio", failed_optimization)
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+    assert_no_portfolio_results(app)
+    assert message in [element.value for element in app.error]
+    assert not any("Frontier" in plot["title"] for plot in responses["plots"])
+    assert_valid_downloads_remain_available(app)
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("controlled FTP timeout"), ftplib.error_perm("550 unavailable")])
+def test_catalog_provider_failure_stops_cleanly(offline_app, monkeypatch, failure):
+    """BUG09: failures raised by the catalogue provider do not expose a traceback."""
+    create_app, _, calls = offline_app
+
+    def fail_transfer(self, command, callback, *args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(FakeFTP, "retrbinary", fail_transfer)
+    app = create_app()
+    assert_no_portfolio_results(app)
+    assert not calls
+
+
+def test_invalid_catalog_stops_cleanly(offline_app, monkeypatch):
+    create_app, _, calls = offline_app
+    monkeypatch.setattr(FakeFTP, "files", {**FakeFTP.files, "nasdaqlisted.txt": b"bad|schema\nwrong|columns\n"})
+    app = create_app()
+    assert_no_portfolio_results(app)
+    assert not calls
+
+
+@pytest.mark.parametrize("provider", ["prices", "yield"])
+def test_yahoo_exception_stops_cleanly(offline_app, provider):
+    """BUG10: both external Yahoo calls have a recoverable error boundary."""
+    create_app, responses, calls = offline_app
+    responses[provider] = TimeoutError("controlled Yahoo timeout")
+    app = select_and_go(create_app(), ["AAPL", "MSFT"])
+    assert_no_portfolio_results(app)
+    assert len(calls) == (1 if provider == "prices" else 2)
+
+
+def test_single_asset_yahoo_exception_stops_cleanly(offline_app):
+    create_app, responses, calls = offline_app
+    responses["prices"] = TimeoutError("controlled Yahoo timeout")
+    app = select_and_go(create_app(), ["NA"])
+    assert_no_portfolio_results(app)
+    assert len(calls) == 1
+
+
+def test_kde_describes_returns_and_selected_interval(offline_app):
+    """BUG11: negative/positive returns are labeled as returns, including their horizon."""
+    create_app, responses, _ = offline_app
+    app = create_app()
+    app.sidebar.selectbox[1].set_value("1mo")
+    app = select_and_go(app, ["AAPL", "MSFT"])
+
+    assert_no_exception(app)
+    assert not app.error
+    title = "Distribution of Returns by Asset (KDE)"
+    assert any(title in element.value for element in app.markdown)
+    kde_axes = [plot for plot in responses["plots"] if plot["title"] == title]
+    assert len(kde_axes) == 1
+    assert kde_axes[0]["xlabel"] == "Return (1mo)"
+    assert not any("Distribution of Volatility" in element.value for element in app.markdown)
+
+
+def test_other_exchange_codes_keep_independent_filters(offline_app, monkeypatch):
+    """BUG12: a known code retains its market and an unknown code stays explicit."""
+    create_app, _, calls = offline_app
+    extra_rows = (
+        "AAA|BATS security|Z|AAA|Y|100|N|AAA\n"
+        "ACU|NYSE MKT security|A|ACU|N|100|N|ACU\n"
+        "IEXS|IEX security|V|IEXS|N|100|N|IEXS\n"
+        "UNKN|Unknown market security|F|UNKN|N|100|N|UNKN\n"
+    )
+    directory = OTHER_DIRECTORY.replace("File Creation Time:", extra_rows + "File Creation Time:")
+    monkeypatch.setattr(FakeFTP, "files", {**FakeFTP.files, "otherlisted.txt": directory.encode()})
+    app = create_app()
+    expected_markets = {"NYSE": ["IBM"], "NYSE Arca": ["SPY"], "BATS": ["AAA"], "NYSE MKT": ["ACU"], "IEX": ["IEXS"], "Unknown (F)": ["UNKN"]}
+    for market, symbols in expected_markets.items():
+        assert market in app.sidebar.radio[1].options
+        app.sidebar.radio[1].set_value(market).run()
+        assert_no_exception(app)
+        assert app.sidebar.multiselect[0].options == symbols
+    assert not calls
