@@ -35,6 +35,13 @@ rebuild from `requirements.txt`; reboot the app from its management panel if nee
 Check that the default All / All / Symbol filters load, that `NA` is selectable,
 and that selecting two assets and pressing Go reaches Portfolio Metrics.
 
+The app imports `portfolio_modes_v1`, a distinct module for the long/short API.
+This prevents a running Cloud process from reusing the earlier long-only
+`portfolio` import when it receives the updated entry point. The implementation
+uses Python's normal import locking; it does not reload or replace shared modules.
+`portfolio.py` remains a compatibility facade for the four public API symbols.
+Future incompatible optimizer interfaces should receive a new module identity.
+
 The pandas 3 startup fix preserves the valid ticker `NA` when reading CSV and
 removes missing labels before sorting. The Treasury-yield calculation extracts a
 scalar explicitly, which is required for pandas 3 and yfinance's MultiIndex data.
