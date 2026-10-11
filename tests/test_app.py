@@ -156,6 +156,7 @@ def offline_app(monkeypatch, tmp_path):
                 raise responses["yield"]
             return responses["yield"].copy()
         assert isinstance(tickers, list), "Unexpected market-data request"
+        assert kwargs.get("auto_adjust") is True, "Asset returns require explicitly adjusted prices"
         if responses["prices"] is not None:
             if isinstance(responses["prices"], Exception):
                 raise responses["prices"]
@@ -285,7 +286,7 @@ def test_two_assets_complete_with_scalar_treasury_yield(offline_app, layout):
     assert any("Efficient Frontier and Portfolio Optimization" in element.value for element in app.markdown)
     metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
     assert len(metrics) == 1
-    assert np.isfinite(metrics[0][["Return", "Std Dev", "Sharpe Ratio"]].to_numpy()).all()
+    assert np.isfinite(metrics[0][["Annual Return", "Annual Volatility", "Sharpe Ratio"]].to_numpy()).all()
     assert metrics[0].iloc[0]["Portfolio"] == "Long-only Max Sharpe Ratio"
 
 
@@ -370,7 +371,7 @@ def test_empty_price_download_stops_cleanly(offline_app, symbols):
     assert not any("Download Time Series" in element.value for element in app.markdown)
 
 
-@pytest.mark.parametrize("interval", ["1d", "5d", "1mo", "3mo"])
+@pytest.mark.parametrize("interval", ["1d", "1wk", "1mo", "3mo"])
 def test_returns_csv_retains_first_return_dates_and_interval(offline_app, interval):
     """BUG01/02: every valid observation survives the app's actual CSV export."""
     create_app, responses, _ = offline_app
@@ -458,16 +459,16 @@ def test_weights_metrics_and_frontier_marker_describe_same_long_only_portfolio(o
     assert weights.sum() == pytest.approx(1, abs=1e-8)
 
     returns = downloaded_returns(app)
-    expected_return = float(weights @ returns.mean().to_numpy())
-    expected_risk = float(np.sqrt(weights @ returns.cov().to_numpy() @ weights))
-    # The IRX proxy is a simple return for the same daily interval as the assets.
-    risk_free = 0.042 / (360 - 91 * 0.042)
+    expected_return = float(weights @ (returns.mean().to_numpy() * 252))
+    expected_risk = float(np.sqrt(weights @ (returns.cov().to_numpy() * 252) @ weights))
+    # Compare annual arithmetic moments with the full annual simple IRX proxy.
+    risk_free = 365 * 0.042 / (360 - 91 * 0.042)
     metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
     assert len(metrics) == 1
     displayed = metrics[0].iloc[0]
     assert displayed["Portfolio"] == "Long-only Max Sharpe Ratio"
-    assert displayed["Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
-    assert displayed["Std Dev"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
+    assert displayed["Annual Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
+    assert displayed["Annual Volatility"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
     assert displayed["Sharpe Ratio"] == pytest.approx((expected_return - risk_free) / expected_risk, rel=1e-7)
 
     markers = [
