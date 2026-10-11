@@ -144,16 +144,25 @@ def test_irx_units_provenance_and_sharpe_for_every_interval_and_mode(irx_app, in
     assert_interval_calculations(app, evidence, interval, mode)
 
 
-def test_valid_irx_quote_is_cached_across_go_modes_and_intervals(irx_app):
+def test_valid_irx_quote_is_cached_across_analysis_modes_and_intervals(irx_app):
     create_app, responses, calls, evidence = irx_app
     app = select_and_go(create_app(), ["AAPL", "MSFT"])
     assert_interval_calculations(app, evidence, "1d", "Long-only")
     assert_proxy_request(calls)
 
-    # A new provider value must not replace the valid cached quote on every Go.
+    # Repeating an already successful analysis reuses the entire snapshot.
     responses["yield"] = treasury_yield(value=9.9)
     app.sidebar.button[0].click().run()
     assert_interval_calculations(app, evidence, "1d", "Long-only")
+    assert len(evidence["optimizations"]) == 1
+    assert len([call for call in calls if isinstance(call["tickers"], list)]) == 1
+
+    # Refresh requests prices again while retaining the validated IRX cache.
+    app.button(key="refresh_analyzed_data").click().run()
+    assert_interval_calculations(app, evidence, "1d", "Long-only")
+    assert len(evidence["optimizations"]) == 2
+    assert len([call for call in calls if isinstance(call["tickers"], list)]) == 2
+    assert_proxy_request(calls)
 
     app = set_mode(app, "Short allowed")
     app.sidebar.button[0].click().run()

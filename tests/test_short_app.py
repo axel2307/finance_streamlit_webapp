@@ -108,7 +108,7 @@ def test_long_only_default_preserves_existing_controls(short_app):
     app = create_app()
 
     assert [radio.label for radio in app.sidebar.radio] == [
-        "Asset Class", "Exchange", "Serch by:", "Portfolio mode"
+        "Asset Class", "Exchange", "Search by", "Portfolio mode"
     ]
     mode = app.sidebar.radio(key="portfolio_mode")
     assert mode.options == ["Long-only", "Short allowed"]

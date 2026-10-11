@@ -33,7 +33,8 @@ Use repository `axel2307/finance_streamlit_webapp` and main file
 After reviewing and publishing the fix to the deployed branch, let Community Cloud
 rebuild from `requirements.txt`; reboot the app from its management panel if needed.
 Check that the default All / All / Symbol filters load, that `NA` is selectable,
-and that selecting two assets and pressing Go reaches Portfolio Metrics.
+and that selecting two assets and pressing **Analyze portfolio** reaches the
+Overview metrics and composition.
 
 The app imports `portfolio_modes_v1`, a distinct module for the long/short API.
 This prevents a running Cloud process from reusing the earlier long-only
@@ -83,13 +84,50 @@ net and gross exposures. A 100% gross limit is equivalent to long-only.
 
 The current `^IRX` proxy follows the simple-yield conversion below. Portfolio
 optimization, returns, volatility and Sharpe use annual units as described below.
-Historical-rate alignment and visual redesign remain separate product decisions.
+Historical-rate alignment remains outside the current model.
 The app is educational and its estimates do not guarantee future performance.
 
 The regression suite covers the twelve reviewed defects: return retention and
 CSV dates (BUG01/02), usable data and covariance (BUG03/04), optimality and a shared
 long-only model (BUG05/06), solver failures and equal-mean frontiers (BUG07/08),
 provider errors (BUG09/10), KDE semantics (BUG11) and exchange identity (BUG12).
+
+## Analysis workspace
+
+The compact workspace keeps asset search and the **Analyze portfolio** action in
+the sidebar. Asset filters and the full catalog are collapsed by default. The
+interface uses four tabs: **Overview** for annual return, volatility and Sharpe
+cards plus optimal composition; **Risk** for correlations and return distributions;
+**Optimization** for the frontier; and **Data** for observed prices, returns and CSVs.
+Chart markers use distinct shapes, outlines, text and numeric table counterparts.
+
+Changing a control edits a draft without downloading prices or running the
+optimizer. Each submitted analysis stores its own settings, UTC completion time,
+validated data and result in the Streamlit session. If the draft differs, a
+pending-changes message identifies that the visible results and downloads still
+belong to the analyzed settings. Filters remove selections that are no longer
+available. Submitting an empty selection clears the prior analysis.
+
+Submitting unchanged successful settings reuses the saved result, including on a
+double click. **Refresh analyzed data** in Data explicitly downloads new prices
+for those saved settings, even when sidebar changes remain pending. The validated
+IRX quote retains its existing one-hour cache. Tabs and static CSV download links
+do not submit settings. State persists across reruns in the current session;
+a new browser session or server restart can reset it.
+
+Each new attempt replaces the previous result. A price failure never exposes old
+downloads as new data. A return, IRX or optimization failure preserves only the
+validated price/return CSVs from that attempt, with a clear error and no portfolio
+metrics. Failed attempts can be retried. A temporary catalog outage still permits
+viewing and refreshing a saved analysis.
+
+One asset provides adjusted price history, simple returns and downloads without
+requesting IRX or optimizing. At least two assets are required for portfolio
+optimization. CSV rows retain their original frequency and units; filenames
+identify the analyzed assets, period and frequency, with the mode/gross limit
+also included for weights. The existing single-asset Time Series CSV retains the
+provider's available OHLC/volume fields and export schema; multi-asset Time Series
+CSVs contain adjusted closes. The new single-asset return CSV uses validated closes.
 
 ## Risk-free proxy
 

@@ -222,7 +222,7 @@ def test_startup_preserves_na_ticker_and_excludes_invalid_directory_rows(offline
     assert app.sidebar.multiselect[0].options == ["AAPL", "IBM", "MSFT", "NA", "QQQ", "SPY"]
     assert app.sidebar.selectbox[0].value == "1y"
     assert app.sidebar.selectbox[1].value == "1d"
-    assert app.title[0].value == "Portfolio Optimization and Financial Analytics Tool"
+    assert app.title[0].value == "Portfolio Analytics"
     assert not calls
 
 
@@ -259,7 +259,9 @@ def test_go_without_selection_warns_without_downloading(offline_app):
     app.sidebar.button[0].click().run()
 
     assert_no_exception(app)
-    assert [warning.value for warning in app.warning] == ["You must select an asset first"]
+    assert [warning.value for warning in app.warning] == [
+        "Select at least one asset, then choose Analyze portfolio."
+    ]
     assert not calls
 
 
@@ -548,7 +550,7 @@ def test_kde_describes_returns_and_selected_interval(offline_app):
     assert not app.error
     title = "Distribution of Returns by Asset (KDE)"
     assert any(title in element.value for element in app.markdown)
-    kde_axes = [plot for plot in responses["plots"] if plot["title"] == title]
+    kde_axes = [plot for plot in responses["plots"] if plot["title"] == "Return distributions"]
     assert len(kde_axes) == 1
     assert kde_axes[0]["xlabel"] == "Return (1mo)"
     assert not any("Distribution of Volatility" in element.value for element in app.markdown)
