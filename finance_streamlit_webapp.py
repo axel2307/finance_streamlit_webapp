@@ -12,6 +12,7 @@ import yfinance as yf
 
 from finance_data import DataError, extract_close_prices, parse_catalog, prepare_returns
 import portfolio_modes_v1 as portfolio
+from risk_free_irx_v1 import interval_risk_free_rate, read_irx_quote
 
 
 @st.cache_data(ttl=3600)
@@ -39,20 +40,11 @@ def download_data(label, **kwargs):
     return result
 
 
-def read_treasury_yield(data):
-    if data.columns.has_duplicates or 'Close' not in data.columns:
-        raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
-    close = data['Close']
-    if isinstance(close, pd.DataFrame):
-        if '^TNX' not in close.columns:
-            raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
-        close = close['^TNX']
-    if not isinstance(close, pd.Series):
-        raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
-    valid = pd.to_numeric(close, errors='coerce').dropna()
-    if valid.empty or not np.isfinite(valid.iloc[-1]) or valid.iloc[-1] <= -100:
-        raise DataError('The Treasury yield (^TNX) is unavailable. Please try again later.')
-    return float(valid.iloc[-1])
+@st.cache_data(ttl=3600)
+def load_risk_free_proxy():
+    """Cache only a validated latest quote; failed downloads are never cached."""
+    quotes = download_data('The Treasury bill proxy (^IRX)', tickers='^IRX', period='5d', interval='1d')
+    return read_irx_quote(quotes)
 
 
 def filedownload(df, text='Download CSV File'):
@@ -225,12 +217,9 @@ if st.sidebar.button('Go'):
             try:
                 mean_ret = df_stocks.mean(axis=0).to_numpy()
                 varcov = df_stocks.cov().to_numpy()
-                ten_year_yield = download_data('The Treasury yield (^TNX)', tickers='^TNX', period='1d', interval='1d')
-                annual_yield = read_treasury_yield(ten_year_yield)
-                # Preserve the existing rate convention; methodology is a separate decision.
-                days_mapping = {'1d': 1, '5d': 5, '1mo': 30, '3mo': 90}
-                daily_yield = (1 + annual_yield / 100) ** (days_mapping[intervalo] / 365) - 1
-                solution = portfolio.optimize_portfolio(mean_ret, varcov, daily_yield,
+                risk_free_quote = load_risk_free_proxy()
+                interval_rf = interval_risk_free_rate(risk_free_quote.annual_simple_yield, intervalo)
+                solution = portfolio.optimize_portfolio(mean_ret, varcov, interval_rf,
                                                          allow_short=allow_short, gross_limit=gross_limit)
             except (DataError, portfolio.PortfolioError) as exc:
                 st.error(str(exc))
@@ -258,9 +247,11 @@ if st.sidebar.button('Go'):
             else:
                 st.write('Long-only: weights are between 0 and 1 and sum to 1.')
             st.write(result)
-            st.write('I used the ^TNX index, representing the 10-Year U.S. Treasury yield, as a proxy for the risk-free rate:')
-            st.write(f'Risk Free Rate: {annual_yield:.2f}%')
-            st.write(f'Risk Free Yield for the interval {intervalo}: {daily_yield * 100:.2f}%')
+            st.caption(f'Yahoo Finance ^IRX · as of {risk_free_quote.as_of:%Y-%m-%d} · '
+                       f'13-week Treasury bill proxy · assumed 91 days (remaining maturity unknown). '
+                       f'Bank discount quote: {risk_free_quote.discount_quote_percent:.3f}%.')
+            st.write(f'Risk-free proxy (annual simple investment yield): {risk_free_quote.annual_simple_yield * 100:.3f}%')
+            st.write(f'Risk-free return for interval {intervalo}: {interval_rf * 100:.6f}%')
             st.write('### Portfolio Metrics')
             st.table(pd.DataFrame([{'Portfolio': f'{result_mode} Max Sharpe Ratio', 'Return': solution.max_return,
                                    'Std Dev': solution.max_risk, 'Sharpe Ratio': solution.max_sharpe,
@@ -270,6 +261,6 @@ if st.sidebar.button('Go'):
                 st.caption('All feasible portfolios have nonpositive excess returns. Maximizing a negative '
                            'Sharpe ratio can favor higher risk, so this portfolio may lie outside the efficient frontier.')
             st.write('### Efficient Frontier and Portfolio Optimization')
-            plot_efficient_frontier_and_max_sharpe(mean_ret, varcov, daily_yield, solution)
+            plot_efficient_frontier_and_max_sharpe(mean_ret, varcov, interval_rf, solution)
 
 st.write('This web app was created by Axel Rodrigo for educational purposes. For questions and comments, please contact axel.23@hotmail.com.')

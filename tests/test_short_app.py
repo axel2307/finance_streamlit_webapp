@@ -167,7 +167,7 @@ def test_mode_weights_metrics_markers_frontier_and_cloud_are_consistent(short_ap
     returns = downloaded_returns(app)
     means = returns.mean().to_numpy()
     covariance = returns.cov().to_numpy()
-    risk_free = (1 + 4.2 / 100) ** (1 / 365) - 1
+    risk_free = 0.042 / (360 - 91 * 0.042)
     expected_return = float(weights @ means)
     expected_risk = float(np.sqrt(weights @ covariance @ weights))
     metrics = displayed_metrics(app)

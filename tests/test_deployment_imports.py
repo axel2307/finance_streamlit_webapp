@@ -107,7 +107,7 @@ def test_current_app_uses_new_module_without_touching_retained_legacy(
     returns = downloaded_returns(app)
     expected_return = float(weights @ returns.mean().to_numpy())
     expected_risk = float(np.sqrt(weights @ returns.cov().to_numpy() @ weights))
-    risk_free = (1 + 4.2 / 100) ** (1 / 365) - 1
+    risk_free = 0.042 / (360 - 91 * 0.042)
     metrics = displayed_metrics(app)
     assert metrics["Portfolio"] == f"{mode} Max Sharpe Ratio"
     assert metrics["Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
