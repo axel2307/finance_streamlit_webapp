@@ -165,15 +165,15 @@ def test_mode_weights_metrics_markers_frontier_and_cloud_are_consistent(short_ap
         assert_feasible(allocation, gross_limit, allow_short)
 
     returns = downloaded_returns(app)
-    means = returns.mean().to_numpy()
-    covariance = returns.cov().to_numpy()
-    risk_free = 0.042 / (360 - 91 * 0.042)
+    means = returns.mean().to_numpy() * 252
+    covariance = returns.cov().to_numpy() * 252
+    risk_free = 365 * 0.042 / (360 - 91 * 0.042)
     expected_return = float(weights @ means)
     expected_risk = float(np.sqrt(weights @ covariance @ weights))
     metrics = displayed_metrics(app)
     assert metrics["Portfolio"] == f"{mode} Max Sharpe Ratio"
-    assert metrics["Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
-    assert metrics["Std Dev"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
+    assert metrics["Annual Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
+    assert metrics["Annual Volatility"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
     assert metrics["Sharpe Ratio"] == pytest.approx((expected_return - risk_free) / expected_risk, rel=1e-7)
     assert metrics["Net Exposure (%)"] == pytest.approx(weights.sum() * 100)
     assert metrics["Gross Exposure (%)"] == pytest.approx(np.abs(weights).sum() * 100)
@@ -249,7 +249,7 @@ def test_negative_equal_means_show_actual_sharpe_marker_even_off_the_frontier(sh
     assert solution.max_risk > solution.min_risk
     marker = chart_collections(responses, "Max Sharpe Ratio Portfolio (Short allowed)")
     assert len(marker) == 1
-    np.testing.assert_allclose(marker[0], [[metrics["Std Dev"], metrics["Return"]]], rtol=1e-7, atol=1e-10)
+    np.testing.assert_allclose(marker[0], [[metrics["Annual Volatility"], metrics["Annual Return"]]], rtol=1e-7, atol=1e-10)
 
 
 @pytest.mark.parametrize("mode", ["Long-only", "Short allowed"])

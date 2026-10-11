@@ -82,9 +82,8 @@ net and gross exposures. A 100% gross limit is equivalent to long-only.
   `NA` remain supported.
 
 The current `^IRX` proxy follows the simple-yield conversion below. Portfolio
-return, volatility and Sharpe remain expressed per selected interval.
-Historical-rate alignment, portfolio annualization and visual redesign remain
-separate product decisions.
+optimization, returns, volatility and Sharpe use annual units as described below.
+Historical-rate alignment and visual redesign remain separate product decisions.
 The app is educational and its estimates do not guarantee future performance.
 
 The regression suite covers the twelve reviewed defects: return retention and
@@ -112,12 +111,57 @@ the gain against the purchase price on a 365-day basis
 The 91 days are a proxy assumption, not the bill's known remaining maturity;
 this is not an exact replication of DGS3MO or a historical rate series.
 
-`y` is **not an effective annual yield**. Its interval return is prorated as
-`y * days / 365`, using the app's existing day mapping: 1d = 1, 5d = 5,
-1mo = 30, 3mo = 90. No compounding exponent is applied. This rate is passed
-consistently to the optimizer, metrics and charts in both portfolio modes.
+`y` is **not an effective annual yield**. The optimizer now compares it directly
+with annualized arithmetic asset returns; it is not divided by 365 to compare
+against returns per trading observation. No compounding exponent is applied.
+The same annual rate is used by the optimizer, metrics and charts in both modes.
 Zero or negative observed quotes remain valid when the implied bill price is
 positive and the conversion is finite; missing quotes are never replaced by zero.
+
+## Annual portfolio estimates
+
+Asset downloads explicitly use yfinance `auto_adjust=True`. Simple returns are
+computed from adjusted closes without filling missing prices. The default is
+daily data; the sidebar's advanced return-frequency selector also offers weekly,
+monthly and quarterly data. Changing frequency downloads different bars and
+re-estimates the sample, rather than changing the display of the same result.
+
+For a frequency with `N` observations per year, the optimizer receives
+`mean_annual = mean_period * N` and `covariance_annual = covariance_period * N`.
+The covariance uses the sample estimator (`ddof=1`). The conventions are:
+
+| Return interval | N per year |
+| --- | ---: |
+| Daily (`1d`) | 252 |
+| Weekly (`1wk`) | 52 |
+| Monthly (`1mo`) | 12 |
+| Quarterly (`3mo`) | 4 |
+
+The old `5d` **return interval** is replaced by `1wk`: this model has an explicit
+52-week convention and does not assign an arbitrary annual factor to 5-day bars.
+`5d` remains available as a historical lookback period and for the IRX request.
+
+Portfolio volatility follows the square-root-of-time convention, `sigma * sqrt(N)`.
+Annual Sharpe is `(annual arithmetic return - annual IRX proxy) / annual volatility`;
+it receives no second annualization. This convention assumes stable moments and
+does not account for serial correlation
+([Sharpe, Time Dependence](https://web.stanford.edu/~wfsharpe/art/sr/sr.htm)).
+Weights, per-asset means, portfolio metrics, frontier, optimal markers and random
+portfolios share these annual inputs and exposure constraints. Return, volatility
+and weights are formatted as percentages; Sharpe is dimensionless. Covariance
+remains in annual squared-return units, and the KDE shows periodic simple returns.
+
+These are **in-sample estimates of annual arithmetic returns**, not forecasts,
+realized gains or compounded returns. No CAGR is shown because the app does not
+define a rebalanced portfolio wealth path. The current IRX proxy is not a
+historical rate series, and short borrowing costs remain outside this model.
+
+Price and return CSVs preserve the selected-frequency observations and dates;
+their rows are never annualized. The portfolio-weights CSV contains the actual
+signed fractional weights, matching the displayed percentages. Scaling mean,
+covariance and RF by the same positive factor preserves optimal weights; changing
+from the earlier calendar-day RF convention to annual IRX can legitimately change
+weights because it changes the relative expected excess returns.
 
 ## Short-selling optimization
 

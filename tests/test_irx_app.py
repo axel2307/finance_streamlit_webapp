@@ -27,7 +27,7 @@ from test_short_app import (
 # a 360-day basis, and investment returns use simple interest (not compounding).
 DISCOUNT = 4.2 / 100
 ANNUAL_SIMPLE = 365 * DISCOUNT / (360 - 91 * DISCOUNT)
-INTERVAL_DAYS = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90}
+PERIODS_PER_YEAR = {"1d": 252, "1wk": 52, "1mo": 12, "3mo": 4}
 
 
 @pytest.fixture
@@ -90,14 +90,13 @@ def assert_proxy_labels(app, interval):
         f"Risk-free proxy (annual simple investment yield): {ANNUAL_SIMPLE * 100:.3f}%"
         in markdown
     )
-    expected_rf = ANNUAL_SIMPLE * INTERVAL_DAYS[interval] / 365
-    assert f"Risk-free return for interval {interval}: {expected_rf * 100:.6f}%" in markdown
+    assert "Risk-free return for interval" not in markdown
 
 
 def assert_interval_calculations(app, evidence, interval, mode):
     assert_no_exception(app)
     assert not app.error
-    expected_rf = ANNUAL_SIMPLE * INTERVAL_DAYS[interval] / 365
+    expected_rf = ANNUAL_SIMPLE
     captured = evidence["optimizations"][-1]
     assert captured["risk_free"] == pytest.approx(expected_rf, rel=1e-12, abs=1e-15)
     assert captured["kwargs"] == {
@@ -108,8 +107,8 @@ def assert_interval_calculations(app, evidence, interval, mode):
     returns = downloaded_returns(app, interval)
     assert isinstance(returns.index, pd.DatetimeIndex)
     assert len(returns) == 24
-    means = returns.mean().to_numpy()
-    covariance = returns.cov().to_numpy()
+    means = returns.mean().to_numpy() * PERIODS_PER_YEAR[interval]
+    covariance = returns.cov().to_numpy() * PERIODS_PER_YEAR[interval]
     np.testing.assert_allclose(captured["means"], means, rtol=1e-10, atol=1e-14)
     np.testing.assert_allclose(captured["covariance"], covariance, rtol=1e-10, atol=1e-14)
     weights = displayed_weights(app)
@@ -117,8 +116,8 @@ def assert_interval_calculations(app, evidence, interval, mode):
     expected_risk = float(np.sqrt(weights @ covariance @ weights))
     metrics = displayed_metrics(app)
     assert metrics["Portfolio"] == f"{mode} Max Sharpe Ratio"
-    assert metrics["Return"] == pytest.approx(expected_return, rel=1e-9, abs=1e-12)
-    assert metrics["Std Dev"] == pytest.approx(expected_risk, rel=1e-9, abs=1e-12)
+    assert metrics["Annual Return"] == pytest.approx(expected_return, rel=1e-9, abs=1e-12)
+    assert metrics["Annual Volatility"] == pytest.approx(expected_risk, rel=1e-9, abs=1e-12)
     assert metrics["Sharpe Ratio"] == pytest.approx(
         (expected_return - expected_rf) / expected_risk, rel=1e-9, abs=1e-12
     )
@@ -134,7 +133,7 @@ def assert_interval_calculations(app, evidence, interval, mode):
 
 
 @pytest.mark.parametrize("mode", ["Long-only", "Short allowed"])
-@pytest.mark.parametrize("interval", ["1d", "5d", "1mo", "3mo"])
+@pytest.mark.parametrize("interval", ["1d", "1wk", "1mo", "3mo"])
 def test_irx_units_provenance_and_sharpe_for_every_interval_and_mode(irx_app, interval, mode):
     create_app, _, calls, evidence = irx_app
     app = set_mode(create_app(), mode)
@@ -160,9 +159,9 @@ def test_valid_irx_quote_is_cached_across_go_modes_and_intervals(irx_app):
     app.sidebar.button[0].click().run()
     assert_interval_calculations(app, evidence, "1d", "Short allowed")
 
-    app.sidebar.selectbox[1].set_value("5d")
+    app.sidebar.selectbox[1].set_value("1wk")
     app.sidebar.button[0].click().run()
-    assert_interval_calculations(app, evidence, "5d", "Short allowed")
+    assert_interval_calculations(app, evidence, "1wk", "Short allowed")
     assert_proxy_request(calls)
     assert len(evidence["optimizations"]) == 4
     assert len([call for call in calls if isinstance(call["tickers"], list)]) == 4

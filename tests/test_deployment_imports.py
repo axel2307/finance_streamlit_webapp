@@ -105,13 +105,13 @@ def test_current_app_uses_new_module_without_touching_retained_legacy(
         assert weights[1] < -0.1, "The regression must exercise an actual negative position"
 
     returns = downloaded_returns(app)
-    expected_return = float(weights @ returns.mean().to_numpy())
-    expected_risk = float(np.sqrt(weights @ returns.cov().to_numpy() @ weights))
-    risk_free = 0.042 / (360 - 91 * 0.042)
+    expected_return = float(weights @ (returns.mean().to_numpy() * 252))
+    expected_risk = float(np.sqrt(weights @ (returns.cov().to_numpy() * 252) @ weights))
+    risk_free = 365 * 0.042 / (360 - 91 * 0.042)
     metrics = displayed_metrics(app)
     assert metrics["Portfolio"] == f"{mode} Max Sharpe Ratio"
-    assert metrics["Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
-    assert metrics["Std Dev"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
+    assert metrics["Annual Return"] == pytest.approx(expected_return, rel=1e-7, abs=1e-10)
+    assert metrics["Annual Volatility"] == pytest.approx(expected_risk, rel=1e-7, abs=1e-10)
     assert metrics["Sharpe Ratio"] == pytest.approx((expected_return - risk_free) / expected_risk, rel=1e-7)
     suffix = " (Short allowed)" if mode == "Short allowed" else ""
     markers = chart_collections(responses, f"Max Sharpe Ratio Portfolio{suffix}")

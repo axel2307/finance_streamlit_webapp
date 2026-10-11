@@ -4,6 +4,7 @@ from ftplib import FTP, all_errors as ftp_errors
 from io import BytesIO
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -12,7 +13,8 @@ import yfinance as yf
 
 from finance_data import DataError, extract_close_prices, parse_catalog, prepare_returns
 import portfolio_modes_v1 as portfolio
-from risk_free_irx_v1 import interval_risk_free_rate, read_irx_quote
+from risk_free_irx_v1 import read_irx_quote
+from annual_moments_v1 import FREQUENCY_LABELS, PERIODS_PER_YEAR, annualize_returns
 
 
 @st.cache_data(ttl=3600)
@@ -64,7 +66,7 @@ def plot_stock_prices(prices):
     sns.lineplot(data=prices, linewidth=2.5, ax=ax)
     ax.set_title('Stock Price Timelines', fontsize=18, fontweight='bold', pad=15)
     ax.set_xlabel('Date', fontsize=14)
-    ax.set_ylabel('Close Price (USD)', fontsize=14)
+    ax.set_ylabel('Adjusted Close Price (USD)', fontsize=14)
     ax.tick_params(axis='x', rotation=45, labelsize=12)
     ax.tick_params(axis='y', labelsize=12)
     ax.legend(title='Tickers', fontsize=12, title_fontsize=14, loc='upper left')
@@ -106,6 +108,7 @@ def plot_returns_kde_per_asset(returns, interval):
         sns.kdeplot(data=returns[column], label=column, fill=False, linewidth=2, ax=ax)
     ax.set_title('Distribution of Returns by Asset (KDE)', fontsize=16, fontweight='bold', pad=20)
     ax.set_xlabel(f'Return ({interval})', fontsize=14)
+    ax.xaxis.set_major_formatter(PercentFormatter(1))
     ax.set_ylabel('Density', fontsize=14)
     ax.tick_params(labelsize=12)
     ax.legend(title='Assets', fontsize=12, title_fontsize=14)
@@ -135,9 +138,11 @@ def plot_efficient_frontier_and_max_sharpe(mean_returns, covariance, risk_free_r
                label=f'Minimum Variance Portfolio{mode_suffix}')
     ax.scatter(solution.max_risk, solution.max_return, marker='*', color='red', s=200,
                label=f'Max Sharpe Ratio Portfolio{mode_suffix}')
-    ax.set_title(f'Efficient Frontier and Random Portfolios{mode_suffix}', fontsize=16)
-    ax.set_xlabel('Volatility (Risk)', fontsize=14)
-    ax.set_ylabel('Return', fontsize=14)
+    ax.set_title(f'Efficient Frontier and Random Portfolios{mode_suffix} (Annual)', fontsize=16)
+    ax.set_xlabel('Annual Volatility', fontsize=14)
+    ax.set_ylabel('Annual Mean Return', fontsize=14)
+    ax.xaxis.set_major_formatter(PercentFormatter(1))
+    ax.yaxis.set_major_formatter(PercentFormatter(1))
     ax.legend()
     ax.grid(alpha=0.3)
     fig.colorbar(scatter, ax=ax, label='Sharpe Ratio')
@@ -166,7 +171,10 @@ serch_option = st.sidebar.radio('Serch by:', options=('Symbol', 'Security Name')
 sorted_stock_unique = sorted(df_filtrada[serch_option].dropna().astype(str).unique())
 selected_stock = st.sidebar.multiselect('Select Assets', sorted_stock_unique)
 time_delta = st.sidebar.selectbox('Period', options=('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max'), index=5)
-intervalo = st.sidebar.selectbox('Interval', options=('1d', '5d', '1mo', '3mo'))
+with st.sidebar.expander('Advanced: return frequency'):
+    intervalo = st.selectbox('Return frequency', options=tuple(PERIODS_PER_YEAR),
+                            format_func=lambda value: FREQUENCY_LABELS[value], key='return_frequency')
+    st.caption('Daily by default. Changing frequency downloads new bars and re-estimates the portfolio.')
 portfolio_mode = st.sidebar.radio('Portfolio mode', options=('Long-only', 'Short allowed'),
                                   key='portfolio_mode')
 allow_short = portfolio_mode == 'Short allowed'
@@ -195,7 +203,8 @@ if st.sidebar.button('Go'):
         st.markdown('### Selected Assets')
         st.table(df_selected_stock)
         try:
-            data_stocks = download_data('Price data', tickers=ticker_list, period=time_delta, interval=intervalo)
+            data_stocks = download_data('Price data', tickers=ticker_list, period=time_delta,
+                                        interval=intervalo, auto_adjust=True)
             time_series_close = extract_close_prices(data_stocks, ticker_list)
         except DataError as exc:
             st.error(str(exc))
@@ -203,7 +212,7 @@ if st.sidebar.button('Go'):
         if len(ticker_list) == 1:
             st.markdown(filedownload(data_stocks.reset_index(level=0), text='Download Time Series'), unsafe_allow_html=True)
         else:
-            st.write('Filtered DataFrame with Close Prices:')
+            st.write('Filtered DataFrame with Adjusted Close Prices:')
             st.write(time_series_close)
             st.markdown(filedownload(time_series_close, text='Download Time Series'), unsafe_allow_html=True)
             try:
@@ -215,11 +224,11 @@ if st.sidebar.button('Go'):
             if time_series_close.isna().any().any():
                 st.info(f'Partial price history: using {len(df_stocks)} common return observations without filling missing prices.')
             try:
-                mean_ret = df_stocks.mean(axis=0).to_numpy()
-                varcov = df_stocks.cov().to_numpy()
+                annual = annualize_returns(df_stocks, intervalo)
+                mean_ret, varcov = annual.mean_returns, annual.covariance
                 risk_free_quote = load_risk_free_proxy()
-                interval_rf = interval_risk_free_rate(risk_free_quote.annual_simple_yield, intervalo)
-                solution = portfolio.optimize_portfolio(mean_ret, varcov, interval_rf,
+                annual_rf = risk_free_quote.annual_simple_yield
+                solution = portfolio.optimize_portfolio(mean_ret, varcov, annual_rf,
                                                          allow_short=allow_short, gross_limit=gross_limit)
             except (DataError, portfolio.PortfolioError) as exc:
                 st.error(str(exc))
@@ -230,8 +239,11 @@ if st.sidebar.button('Go'):
             plot_stock_prices(time_series_close)
             st.write('### Normalized Stock Price Timelines')
             plot_normalized_prices(time_series_close)
-            st.write('### Variance - Covariance Matrix')
-            st.write(df_stocks.cov())
+            st.caption(f'Annual estimates use {annual.periods_per_year} periods/year ({intervalo}): '
+                       'arithmetic mean × N, covariance × N, volatility × √N. '
+                       'In-sample estimates, not forecasts or realized gains. CSV returns remain per observation.')
+            st.write('### Annual Variance - Covariance Matrix')
+            st.write(pd.DataFrame(varcov, index=df_stocks.columns, columns=df_stocks.columns))
             correlation = df_stocks.corr().round(2)
             st.write('### Correlation Matrix')
             st.write(correlation)
@@ -239,28 +251,32 @@ if st.sidebar.button('Go'):
             st.write('### Distribution of Returns by Asset (KDE)')
             plot_returns_kde_per_asset(df_stocks, intervalo)
 
-            result = pd.DataFrame({'Symbol': df_stocks.columns, 'Opt Weight': solution.weights, 'Avg Return': mean_ret})
+            result = pd.DataFrame({'Symbol': df_stocks.columns, 'Opt Weight': solution.weights, 'Annual Mean Return': mean_ret})
             st.write('### Portfolio Optimization: Optimal Weights for Selected Assets')
             result_mode = 'Short allowed' if solution.allow_short else 'Long-only'
             if solution.allow_short:
                 st.write(f'Short allowed: weights sum to 1 and gross exposure is at most {solution.gross_limit:.0%}.')
             else:
                 st.write('Long-only: weights are between 0 and 1 and sum to 1.')
-            st.write(result)
+            st.dataframe(result.style.format({'Opt Weight': '{:.2%}', 'Annual Mean Return': '{:.2%}'}))
+            st.markdown(filedownload(result[['Symbol', 'Opt Weight']].set_index('Symbol'),
+                                    text='Download Portfolio Weights'), unsafe_allow_html=True)
             st.caption(f'Yahoo Finance ^IRX · as of {risk_free_quote.as_of:%Y-%m-%d} · '
                        f'13-week Treasury bill proxy · assumed 91 days (remaining maturity unknown). '
                        f'Bank discount quote: {risk_free_quote.discount_quote_percent:.3f}%.')
             st.write(f'Risk-free proxy (annual simple investment yield): {risk_free_quote.annual_simple_yield * 100:.3f}%')
-            st.write(f'Risk-free return for interval {intervalo}: {interval_rf * 100:.6f}%')
             st.write('### Portfolio Metrics')
-            st.table(pd.DataFrame([{'Portfolio': f'{result_mode} Max Sharpe Ratio', 'Return': solution.max_return,
-                                   'Std Dev': solution.max_risk, 'Sharpe Ratio': solution.max_sharpe,
+            st.table(pd.DataFrame([{'Portfolio': f'{result_mode} Max Sharpe Ratio', 'Annual Return': solution.max_return,
+                                   'Annual Volatility': solution.max_risk, 'Sharpe Ratio': solution.max_sharpe,
                                    'Net Exposure (%)': float(np.sum(solution.weights)) * 100,
-                                   'Gross Exposure (%)': float(np.sum(np.abs(solution.weights))) * 100}]))
+                                   'Gross Exposure (%)': float(np.sum(np.abs(solution.weights))) * 100}]).style.format({
+                                       'Annual Return': '{:.2%}', 'Annual Volatility': '{:.2%}',
+                                       'Sharpe Ratio': '{:.3f}', 'Net Exposure (%)': '{:.2f}%',
+                                       'Gross Exposure (%)': '{:.2f}%'}))
             if solution.allow_short and solution.all_excess_returns_nonpositive and solution.max_sharpe < 0:
                 st.caption('All feasible portfolios have nonpositive excess returns. Maximizing a negative '
                            'Sharpe ratio can favor higher risk, so this portfolio may lie outside the efficient frontier.')
             st.write('### Efficient Frontier and Portfolio Optimization')
-            plot_efficient_frontier_and_max_sharpe(mean_ret, varcov, interval_rf, solution)
+            plot_efficient_frontier_and_max_sharpe(mean_ret, varcov, annual_rf, solution)
 
 st.write('This web app was created by Axel Rodrigo for educational purposes. For questions and comments, please contact axel.23@hotmail.com.')
