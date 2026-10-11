@@ -1,4 +1,4 @@
-"""Streamlit interface for public market data and validated long-only portfolios."""
+"""Streamlit interface for public market data and validated portfolio modes."""
 import base64
 from ftplib import FTP, all_errors as ftp_errors
 from io import BytesIO
@@ -124,19 +124,26 @@ def plot_returns_kde_per_asset(returns, interval):
 def plot_efficient_frontier_and_max_sharpe(mean_returns, covariance, risk_free_rate, solution):
     """Render the same validated solution used by the weights and metrics tables."""
     random_weights = np.random.dirichlet(np.ones(len(mean_returns)), 1000)
+    mode_suffix = ' (Short allowed)' if solution.allow_short else ''
+    if solution.allow_short:
+        short_weights = np.random.dirichlet(np.ones(len(mean_returns)), 1000)
+        short_exposure = np.random.uniform(0, (solution.gross_limit - 1) / 2, size=(1000, 1))
+        # Both legs sum to one, so net exposure is one and realized gross is
+        # at most 1 + 2*s. Overlap can reduce gross exposure below that budget.
+        random_weights = (1 + short_exposure) * random_weights - short_exposure * short_weights
     random_returns = random_weights @ mean_returns
     random_risks = np.sqrt(np.einsum('ij,jk,ik->i', random_weights, covariance, random_weights))
     random_sharpes = (random_returns - risk_free_rate) / random_risks
     fig, ax = plt.subplots(figsize=(12, 8))
     scatter = ax.scatter(random_risks, random_returns, c=random_sharpes, cmap='viridis',
-                         marker='.', alpha=0.7, label='Random Portfolios')
+                         marker='.', alpha=0.7, label=f'Random Portfolios{mode_suffix}')
     ax.plot(solution.frontier_risks, solution.frontier_returns, color='blue', linewidth=2,
-            marker='.' if len(solution.frontier_returns) == 1 else None, label='Efficient Frontier')
+            marker='.' if len(solution.frontier_returns) == 1 else None, label=f'Efficient Frontier{mode_suffix}')
     ax.scatter(solution.min_risk, solution.min_return, marker='o', color='green', s=100,
-               label='Minimum Variance Portfolio')
+               label=f'Minimum Variance Portfolio{mode_suffix}')
     ax.scatter(solution.max_risk, solution.max_return, marker='*', color='red', s=200,
-               label='Max Sharpe Ratio Portfolio')
-    ax.set_title('Efficient Frontier and Random Portfolios', fontsize=16)
+               label=f'Max Sharpe Ratio Portfolio{mode_suffix}')
+    ax.set_title(f'Efficient Frontier and Random Portfolios{mode_suffix}', fontsize=16)
     ax.set_xlabel('Volatility (Risk)', fontsize=14)
     ax.set_ylabel('Return', fontsize=14)
     ax.legend()
@@ -168,6 +175,18 @@ sorted_stock_unique = sorted(df_filtrada[serch_option].dropna().astype(str).uniq
 selected_stock = st.sidebar.multiselect('Select Assets', sorted_stock_unique)
 time_delta = st.sidebar.selectbox('Period', options=('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max'), index=5)
 intervalo = st.sidebar.selectbox('Interval', options=('1d', '5d', '1mo', '3mo'))
+portfolio_mode = st.sidebar.radio('Portfolio mode', options=('Long-only', 'Short allowed'),
+                                  key='portfolio_mode')
+allow_short = portfolio_mode == 'Short allowed'
+gross_limit = 1.0
+if allow_short:
+    gross_limit_percent = st.sidebar.number_input('Gross exposure limit (%)', min_value=100,
+                                                 value=200, step=25, key='gross_limit_percent')
+    gross_limit = gross_limit_percent / 100
+    st.sidebar.caption('Negative weights are short positions. Net exposure stays at 100%. '
+                       'Gross exposure is the sum of absolute weights. '
+                       'For example, a 200% gross limit allows up to 150% long and 50% short exposure. '
+                       'Borrowing costs are not included.')
 
 st.title('Portfolio Optimization and Financial Analytics Tool')
 st.subheader('Analyze stocks and ETFs from NASDAQ and other U.S. exchanges, download time series, compute returns, variance-covariance and correlation matrices, and optimize portfolios using the Sharpe Ratio with data powered by yFinance.')
@@ -211,7 +230,8 @@ if st.sidebar.button('Go'):
                 # Preserve the existing rate convention; methodology is a separate decision.
                 days_mapping = {'1d': 1, '5d': 5, '1mo': 30, '3mo': 90}
                 daily_yield = (1 + annual_yield / 100) ** (days_mapping[intervalo] / 365) - 1
-                solution = portfolio.optimize_portfolio(mean_ret, varcov, daily_yield)
+                solution = portfolio.optimize_portfolio(mean_ret, varcov, daily_yield,
+                                                         allow_short=allow_short, gross_limit=gross_limit)
             except (DataError, portfolio.PortfolioError) as exc:
                 st.error(str(exc))
                 st.stop()
@@ -232,14 +252,23 @@ if st.sidebar.button('Go'):
 
             result = pd.DataFrame({'Symbol': df_stocks.columns, 'Opt Weight': solution.weights, 'Avg Return': mean_ret})
             st.write('### Portfolio Optimization: Optimal Weights for Selected Assets')
-            st.write('Long-only: weights are between 0 and 1 and sum to 1.')
+            result_mode = 'Short allowed' if solution.allow_short else 'Long-only'
+            if solution.allow_short:
+                st.write(f'Short allowed: weights sum to 1 and gross exposure is at most {solution.gross_limit:.0%}.')
+            else:
+                st.write('Long-only: weights are between 0 and 1 and sum to 1.')
             st.write(result)
             st.write('I used the ^TNX index, representing the 10-Year U.S. Treasury yield, as a proxy for the risk-free rate:')
             st.write(f'Risk Free Rate: {annual_yield:.2f}%')
             st.write(f'Risk Free Yield for the interval {intervalo}: {daily_yield * 100:.2f}%')
             st.write('### Portfolio Metrics')
-            st.table(pd.DataFrame([{'Portfolio': 'Long-only Max Sharpe Ratio', 'Return': solution.max_return,
-                                   'Std Dev': solution.max_risk, 'Sharpe Ratio': solution.max_sharpe}]))
+            st.table(pd.DataFrame([{'Portfolio': f'{result_mode} Max Sharpe Ratio', 'Return': solution.max_return,
+                                   'Std Dev': solution.max_risk, 'Sharpe Ratio': solution.max_sharpe,
+                                   'Net Exposure (%)': float(np.sum(solution.weights)) * 100,
+                                   'Gross Exposure (%)': float(np.sum(np.abs(solution.weights))) * 100}]))
+            if solution.allow_short and solution.all_excess_returns_nonpositive and solution.max_sharpe < 0:
+                st.caption('All feasible portfolios have nonpositive excess returns. Maximizing a negative '
+                           'Sharpe ratio can favor higher risk, so this portfolio may lie outside the efficient frontier.')
             st.write('### Efficient Frontier and Portfolio Optimization')
             plot_efficient_frontier_and_max_sharpe(mean_ret, varcov, daily_yield, solution)
 

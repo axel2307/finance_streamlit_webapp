@@ -1,4 +1,4 @@
-"""Validated, fully invested long-only portfolio analysis.
+"""Validated, fully invested portfolios with a shared exposure policy.
 
 All returns, covariances and the risk-free rate must refer to the same interval.
 This module deliberately does not choose an annualization or rate convention.
@@ -27,6 +27,8 @@ class PortfolioResult:
     frontier_risks: np.ndarray
     frontier_weights: np.ndarray
     all_excess_returns_nonpositive: bool
+    allow_short: bool = False
+    gross_limit: float = 1.0
 
 
 _FEASIBILITY_TOL = 1e-7
@@ -79,13 +81,40 @@ def _inputs(mean_returns, covariance, risk_free_rate):
     return means, scaled, scale, rf, excess
 
 
-def _weights(weights, count):
+def _policy(allow_short, gross_limit):
+    if not isinstance(allow_short, (bool, np.bool_)):
+        raise PortfolioError("The short-selling option must be true or false.")
+    if not allow_short:
+        return 1.0
+    if isinstance(gross_limit, (bool, np.bool_)):
+        raise PortfolioError("The gross exposure limit must be a finite number of at least 1 (100%).")
+    try:
+        gross = float(gross_limit)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PortfolioError("The gross exposure limit must be a finite number of at least 1 (100%).") from exc
+    if not np.isfinite(gross) or gross < 1:
+        raise PortfolioError("The gross exposure limit must be a finite number of at least 1 (100%).")
+    return gross
+
+
+def _weights(weights, count, *, allow_short=False, gross_limit=1.0):
     try:
         values = np.asarray(weights, dtype=float)
     except (TypeError, ValueError, OverflowError) as exc:
         raise PortfolioError("Portfolio weights must be finite numbers.") from exc
     if values.shape != (count,) or not np.isfinite(values).all():
         raise PortfolioError("Portfolio weights must match the assets and be finite.")
+    if allow_short:
+        if (
+            abs(float(np.sum(values)) - 1) > _FEASIBILITY_TOL
+            or float(np.sum(np.abs(values))) > gross_limit + _FEASIBILITY_TOL
+        ):
+            raise PortfolioError("Portfolio weights must sum to 1 and respect the gross exposure limit.")
+        # Signed weights must never be clipped to long-only bounds.
+        values = values / np.sum(values)
+        if float(np.sum(np.abs(values))) > gross_limit + _FEASIBILITY_TOL:
+            raise PortfolioError("Portfolio weights exceed the gross exposure limit.")
+        return values
     if (
         np.min(values) < -_FEASIBILITY_TOL
         or np.max(values) > 1 + _FEASIBILITY_TOL
@@ -110,10 +139,14 @@ def _metrics(weights, means, scaled_cov, cov_scale, excess):
     return ret, risk, sharpe
 
 
-def portfolio_metrics(weights, mean_returns, covariance, risk_free_rate):
+def portfolio_metrics(weights, mean_returns, covariance, risk_free_rate, *, allow_short=False, gross_limit=2.0):
     """Return (mean return, standard deviation, Sharpe) per input interval."""
     means, scaled, scale, _, excess = _inputs(mean_returns, covariance, risk_free_rate)
-    return _metrics(_weights(weights, len(means)), means, scaled, scale, excess)
+    gross = _policy(allow_short, gross_limit)
+    return _metrics(
+        _weights(weights, len(means), allow_short=allow_short, gross_limit=gross),
+        means, scaled, scale, excess,
+    )
 
 
 def _unconstrained_minimum(cov, equality, targets):
@@ -134,6 +167,16 @@ def _certify_optimality(cov, solution, equality, targets):
     """Check relative primal/dual KKT errors for any number of equalities."""
     gradient = cov @ solution
     quadratic = float(solution @ gradient)
+    _certify_nonnegative_qp(solution, equality, targets, gradient, quadratic)
+
+
+def _certify_nonnegative_qp(solution, equality, targets, gradient, quadratic):
+    """KKT certificate for a convex QP with equality and nonnegative variables.
+
+    The short-selling lift is positive semidefinite, not positive definite.
+    Its gradient and objective are evaluated through the original positions
+    to avoid subtracting large, nearly equal blocks of an augmented Hessian.
+    """
     gradient_scale = float(np.max(np.abs(gradient)))
     if not np.isfinite([quadratic, gradient_scale]).all() or min(quadratic, gradient_scale) <= 0:
         raise PortfolioError(_SOLVER_ERROR)
@@ -296,16 +339,241 @@ def _maximum_sharpe(cov, excess):
     return _weights(solution / np.sum(solution), count)
 
 
-def optimize_portfolio(mean_returns, covariance, risk_free_rate, points=50):
-    """Optimize and plot-ready frontier under one shared long-only policy.
+def _short_vertex(count, long_asset, short_asset, gross):
+    weights = np.zeros(count)
+    weights[long_asset] = gross / 2 + 0.5
+    weights[short_asset] -= gross / 2 - 0.5
+    return weights
+
+
+def _short_lift(weights, gross, padding_asset):
+    """Represent signed positions with fixed long/short budgets and overlap."""
+    positive = np.maximum(weights, 0)
+    negative = np.maximum(-weights, 0)
+    padding = (gross / 2 - 0.5) * np.sum(weights) - np.sum(negative)
+    if not np.isfinite(padding) or padding < -_FEASIBILITY_TOL:
+        raise PortfolioError(_SOLVER_ERROR)
+    positive[padding_asset] += max(0.0, padding)
+    negative[padding_asset] += max(0.0, padding)
+    return np.r_[positive, negative]
+
+
+def _short_quadratic_minimum(cov, equality, targets, initial, gross, *, homogeneous=False):
+    """Convex signed QP lifted to nonnegative long/short legs.
+
+    For net-one portfolios, sum(long)=A and sum(short)=B, where A-B=1
+    and A+B=gross. Overlapping legs represent unused gross capacity.
+    The homogeneous Sharpe QP instead imposes B*sum(long)=A*sum(short).
+    Only the original covariance is SPD; the lifted objective is PSD.
+    """
+    equality = np.atleast_2d(np.asarray(equality, dtype=float))
+    targets = np.atleast_1d(np.asarray(targets, dtype=float))
+    initial = np.asarray(initial, dtype=float)
+    count = len(initial)
+    deviations = np.sqrt(np.diag(cov))
+    correlation = cov / np.outer(deviations, deviations)
+    try:
+        exact, _ = _unconstrained_minimum(correlation, equality / deviations, targets)
+    except np.linalg.LinAlgError as exc:
+        raise PortfolioError(_SOLVER_ERROR) from exc
+    exact = exact / deviations
+    exact_net = float(np.sum(exact))
+    if (
+        np.isfinite(exact).all()
+        and exact_net > 0
+        and np.sum(np.abs(exact)) <= gross * exact_net
+        and np.max(np.abs(equality @ exact - targets)) <= _FEASIBILITY_TOL
+    ):
+        initial = exact
+    initial_units = deviations * initial
+    risk_scale = float(np.sqrt(initial_units @ correlation @ initial_units))
+    if not np.isfinite(risk_scale) or risk_scale <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    transform = risk_scale / deviations
+    repeated_transform = np.r_[transform, transform]
+    if not np.isfinite(repeated_transform).all() or np.min(repeated_transform) <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    long_budget, short_budget = gross / 2 + 0.5, gross / 2 - 0.5
+    if homogeneous:
+        lifted_equality = np.vstack((
+            np.c_[equality, -equality],
+            np.r_[np.full(count, short_budget), np.full(count, -long_budget)],
+        ))
+        lifted_targets = np.r_[targets, 0.0]
+    else:
+        lifted_equality = np.vstack((
+            np.r_[np.ones(count), np.zeros(count)],
+            np.r_[np.zeros(count), np.ones(count)],
+            np.c_[equality[1:], -equality[1:]],
+        ))
+        lifted_targets = np.r_[long_budget, short_budget, targets[1:]]
+    transformed_equality = lifted_equality * repeated_transform
+    row_scales = np.linalg.norm(transformed_equality, axis=1)
+    if not np.isfinite(row_scales).all() or np.min(row_scales) <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    transformed_equality = transformed_equality / row_scales[:, None]
+    transformed_targets = lifted_targets / row_scales
+    lifted_initial = _short_lift(initial, gross, int(np.argmin(deviations))) / repeated_transform
+    if not np.isfinite(lifted_initial).all() or not np.isfinite(transformed_targets).all():
+        raise PortfolioError(_SOLVER_ERROR)
+
+    def objective(z):
+        positions = z[:count] - z[count:]
+        return 0.5 * float(positions @ correlation @ positions)
+
+    def gradient(z):
+        partial = correlation @ (z[:count] - z[count:])
+        return np.r_[partial, -partial]
+
+    try:
+        result = minimize(
+            objective, lifted_initial, jac=gradient, method="SLSQP",
+            bounds=[(0, None)] * (2 * count),
+            constraints={
+                "type": "eq",
+                "fun": lambda z: transformed_equality @ z - transformed_targets,
+                "jac": lambda z: transformed_equality,
+            },
+            options={"ftol": 1e-12, "maxiter": 1000},
+        )
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        raise PortfolioError(_SOLVER_ERROR) from exc
+    if not getattr(result, "success", False):
+        raise PortfolioError(_SOLVER_ERROR)
+    try:
+        z = np.asarray(result.x, dtype=float)
+        reported_objective = float(result.fun)
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise PortfolioError(_SOLVER_ERROR) from exc
+    if (
+        z.shape != (2 * count,) or not np.isfinite(z).all()
+        or not np.isfinite(reported_objective) or np.min(z) < -_FEASIBILITY_TOL
+    ):
+        raise PortfolioError(_SOLVER_ERROR)
+    original_legs = z * repeated_transform
+    if not np.isfinite(original_legs).all() or np.min(original_legs) < -_FEASIBILITY_TOL:
+        raise PortfolioError(_SOLVER_ERROR)
+    z = np.maximum(z, 0)
+    legs = z * repeated_transform
+    solution = legs[:count] - legs[count:]
+    net = float(np.sum(solution))
+    if (
+        not np.isfinite(solution).all() or net <= 0
+        or np.max(np.abs(equality @ solution - targets)) > _FEASIBILITY_TOL
+        or np.max(np.abs(lifted_equality @ legs - lifted_targets)) > _FEASIBILITY_TOL
+        or np.max(np.abs(transformed_equality @ z - transformed_targets)) > _FEASIBILITY_TOL
+        or np.sum(np.abs(solution)) > gross * net + _FEASIBILITY_TOL
+    ):
+        raise PortfolioError(_SOLVER_ERROR)
+    _certify_nonnegative_qp(z, transformed_equality, transformed_targets, gradient(z), 2 * objective(z))
+    return solution
+
+
+def _maximum_short_sharpe(cov, excess, gross, minimum):
+    count = len(excess)
+    best_return_vertex = _short_vertex(count, int(np.argmax(excess)), int(np.argmin(excess)), gross)
+    maximum_excess = float(best_return_vertex @ excess)
+    if maximum_excess <= 0:
+        if np.all(excess == 0):
+            return minimum.copy(), True
+        # Every feasible point is a convex combination of the A*e_i-B*e_j
+        # vertices. If all have nonpositive excess, the triangle inequality
+        # for the covariance norm bounds its Sharpe by the best vertex's.
+        # Individual negative excess alone is NOT enough for this branch.
+        long_budget, short_budget = gross / 2 + 0.5, gross / 2 - 0.5
+        variances = np.diag(cov)
+        vertex_variance = (
+            long_budget**2 * variances[:, None] + short_budget**2 * variances[None, :]
+            - 2 * long_budget * short_budget * cov
+        )
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            scores = (long_budget * excess[:, None] - short_budget * excess[None, :]) / np.sqrt(vertex_variance)
+        np.fill_diagonal(scores, -np.inf)
+        long_asset, short_asset = np.unravel_index(np.argmax(scores), scores.shape)
+        if not np.isfinite(scores[long_asset, short_asset]):
+            raise PortfolioError(_SOLVER_ERROR)
+        return _short_vertex(count, long_asset, short_asset, gross), True
+    normalized_excess = excess / np.max(np.abs(excess))
+    initial_excess = float(best_return_vertex @ normalized_excess)
+    if not np.isfinite(normalized_excess).all() or initial_excess <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    solution = _short_quadratic_minimum(
+        cov, normalized_excess, [1], best_return_vertex / initial_excess, gross,
+        homogeneous=True,
+    )
+    # The cone plus excess.y=1 implies sum(y)>0. Normalize without clipping.
+    normalized = solution / np.max(np.abs(solution))
+    net = float(np.sum(normalized))
+    if not np.isfinite(net) or net <= 0:
+        raise PortfolioError(_SOLVER_ERROR)
+    return _weights(normalized / net, count, allow_short=True, gross_limit=gross), False
+
+
+def _optimize_short(means, cov, scale, excess, points, gross):
+    count = len(means)
+    initial = np.zeros(count)
+    initial[int(np.argmin(np.diag(cov)))] = 1
+    min_weights = _weights(
+        _short_quadratic_minimum(cov, np.ones(count), [1], initial, gross),
+        count, allow_short=True, gross_limit=gross,
+    )
+    min_return, min_risk, _ = _metrics(min_weights, means, cov, scale, excess)
+    weights, nonpositive = _maximum_short_sharpe(cov, excess, gross, min_weights)
+    weights = _weights(weights, count, allow_short=True, gross_limit=gross)
+    max_return, max_risk, max_sharpe = _metrics(weights, means, cov, scale, excess)
+    if np.all(means == means[0]):
+        frontier_weights = np.array([min_weights])
+    else:
+        relative_returns = (means - np.min(means)) / (np.max(means) - np.min(means))
+        if not np.isfinite(relative_returns).all():
+            raise PortfolioError("The return range cannot be optimized reliably.")
+        maximum_target = gross / 2 + 0.5
+        equality = np.vstack((np.ones(count), relative_returns))
+        # This QP optimizes the entire maximum-return face, including all
+        # long/short cross-covariances when either extreme has tied assets.
+        endpoint = _short_quadratic_minimum(
+            cov, equality, [1, maximum_target],
+            _short_vertex(count, int(np.argmax(means)), int(np.argmin(means)), gross), gross,
+        )
+        start = float(relative_returns @ min_weights)
+        if start >= maximum_target - np.finfo(float).eps * maximum_target:
+            frontier_weights = np.array([min_weights])
+        else:
+            targets = np.linspace(start, maximum_target, points)
+            solutions = [min_weights]
+            for fraction, target in zip(np.linspace(0, 1, points)[1:-1], targets[1:-1]):
+                initial = (1 - fraction) * min_weights + fraction * endpoint
+                solutions.append(_short_quadratic_minimum(cov, equality, [1, target], initial, gross))
+            solutions.append(endpoint)
+            frontier_weights = np.array([
+                _weights(w, count, allow_short=True, gross_limit=gross) for w in solutions
+            ])
+    frontier_metrics = [_metrics(w, means, cov, scale, excess) for w in frontier_weights]
+    return PortfolioResult(
+        weights, max_return, max_risk, max_sharpe, min_weights, min_return, min_risk,
+        np.array([row[0] for row in frontier_metrics]),
+        np.array([row[1] for row in frontier_metrics]), frontier_weights, nonpositive,
+        allow_short=True, gross_limit=gross,
+    )
+
+
+def optimize_portfolio(mean_returns, covariance, risk_free_rate, points=50, *, allow_short=False, gross_limit=2.0):
+    """Optimize all portfolios under one net-one, shared exposure policy.
 
     Rejects singular/indefinite covariance rather than changing the model.
     Equal means produce the single minimum-variance efficient portfolio.
+    Short selling adds an explicit L1 gross cap; its default is 200%.
     """
     means, cov, scale, _, excess = _inputs(mean_returns, covariance, risk_free_rate)
+    gross = _policy(allow_short, gross_limit)
     if isinstance(points, bool) or not isinstance(points, (int, np.integer)) or points < 2:
         raise PortfolioError("The frontier needs at least two requested points.")
     count = len(means)
+    if allow_short and gross > 1 and count > 1:
+        try:
+            return _optimize_short(means, cov, scale, excess, points, gross)
+        except (OverflowError, FloatingPointError, np.linalg.LinAlgError) as exc:
+            raise PortfolioError(_SOLVER_ERROR) from exc
     min_weights = _minimum_variance(cov)
     min_return, min_risk, _ = _metrics(min_weights, means, cov, scale, excess)
     weights = _maximum_sharpe(cov, excess) if count > 1 else np.ones(1)
@@ -350,4 +618,6 @@ def optimize_portfolio(mean_returns, covariance, risk_free_rate, points=50):
         frontier_risks=np.array([row[1] for row in frontier_metrics]),
         frontier_weights=frontier_weights,
         all_excess_returns_nonpositive=bool(np.max(excess) <= 0),
+        allow_short=bool(allow_short),
+        gross_limit=gross,
     )
