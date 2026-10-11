@@ -318,6 +318,9 @@ if catalog is not None:
     selected = st.sidebar.multiselect('Select assets', options, key=selection_key,
                                       placeholder='Search and select assets',
                                       help='Choose one asset for data or at least two for portfolio optimization.')
+    with st.sidebar.expander(f'Available assets ({len(filtered):,})'):
+        st.caption('This catalog follows your asset filters. Search and select assets above.')
+        st.dataframe(filtered, hide_index=True, width='stretch', height=300)
     period = st.sidebar.selectbox('Period', options=('1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max'), index=5)
     with st.sidebar.expander('Advanced: return frequency'):
         interval = st.selectbox('Return frequency', options=tuple(PERIODS_PER_YEAR),
@@ -360,10 +363,5 @@ if snapshot is not None:
 elif catalog is not None:
     st.info('Select assets in the sidebar, then choose Analyze portfolio. '
             'One asset provides data; two or more enable portfolio optimization.')
-
-if catalog is not None:
-    with st.expander(f'Available assets ({len(filtered):,})'):
-        st.caption('This catalog follows your asset filters. Use Search by and Select assets in the sidebar to build a selection.')
-        st.dataframe(filtered, hide_index=True, width='stretch', height=300)
 
 st.caption('Created by Axel Rodrigo for educational purposes. Contact: axel.23@hotmail.com.')
