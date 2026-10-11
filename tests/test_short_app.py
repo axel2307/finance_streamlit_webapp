@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 import streamlit as st
 
-import portfolio
+import portfolio_modes_v1 as portfolio
 from test_app import (
     assert_no_exception,
     assert_no_portfolio_results,

@@ -6,7 +6,7 @@ from itertools import permutations
 import numpy as np
 import pytest
 
-import portfolio
+import portfolio_modes_v1 as portfolio
 from portfolio import PortfolioError, optimize_portfolio, portfolio_metrics
 
 

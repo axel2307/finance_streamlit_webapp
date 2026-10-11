@@ -11,7 +11,7 @@ import streamlit as st
 import yfinance as yf
 
 from finance_data import DataError, extract_close_prices, parse_catalog, prepare_returns
-import portfolio
+import portfolio_modes_v1 as portfolio
 
 
 @st.cache_data(ttl=3600)

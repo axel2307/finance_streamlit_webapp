@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import portfolio
+import portfolio_modes_v1 as portfolio
 from portfolio import PortfolioError, optimize_portfolio
 
 

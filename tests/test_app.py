@@ -482,7 +482,7 @@ def test_weights_metrics_and_frontier_marker_describe_same_long_only_portfolio(o
 
 def test_optimizer_failure_is_explained_before_results(offline_app, monkeypatch):
     """BUG07: the app honors an unsuccessful validation at the optimizer boundary."""
-    import portfolio
+    import portfolio_modes_v1 as portfolio
 
     create_app, responses, _ = offline_app
     message = "The optimizer did not converge. Try a different asset selection."
