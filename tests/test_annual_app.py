@@ -122,8 +122,12 @@ def test_started_session_recalculates_each_frequency_with_annual_inputs_and_nati
     assert frequency.options == [
         "Daily (252/year)", "Weekly (52/year)", "Monthly (12/year)", "Quarterly (4/year)"
     ]
-    assert app.sidebar.expander[0].label == "Advanced: return frequency"
-    assert len(app.sidebar.expander[0].selectbox) == 1
+    frequency_expanders = [
+        expander for expander in app.sidebar.expander
+        if expander.label == "Advanced: return frequency"
+    ]
+    assert len(frequency_expanders) == 1
+    assert len(frequency_expanders[0].selectbox) == 1
     assert not evidence["requests"]
     app = set_mode(app, mode)
     observed_rows = []
@@ -228,7 +232,7 @@ def test_zero_and_negative_annual_returns_are_numeric_and_format_as_percent(annu
 
 
 def test_single_asset_also_requests_adjusted_bars_without_a_treasury_quote(annual_app):
-    create_app, _, calls, evidence, _ = annual_app
+    create_app, _, calls, evidence, bars = annual_app
     app = create_app()
     app.sidebar.selectbox(key="return_frequency").set_value("1wk")
     app = select_and_go(app, ["AAPL"])
@@ -240,3 +244,17 @@ def test_single_asset_also_requests_adjusted_bars_without_a_treasury_quote(annua
     assert not calls
     assert not evidence["optimizations"]
     assert any("Download Time Series" in element.value for element in app.markdown)
+    expected_prices = bars["1wk"].xs("Close", axis=1, level=0)[["AAPL"]]
+    # Preserve the original single-asset raw-price export schema, including
+    # its provider column levels and Date column after reset_index.
+    price_links = [element.value for element in app.markdown if "Download Time Series" in element.value]
+    assert len(price_links) == 1
+    price_payload = re.search(r'base64,([^\"]+)"', price_links[0])
+    assert price_payload is not None
+    raw_prices = bars["1wk"].loc[:, [("Close", "AAPL")]]
+    assert base64.b64decode(price_payload.group(1)).decode() == raw_prices.reset_index(level=0).to_csv(index=True)
+    pd.testing.assert_frame_equal(
+        downloaded_returns(app, "1wk"), expected_prices.pct_change(fill_method=None).iloc[1:],
+        check_freq=False, check_names=False, rtol=1e-10, atol=1e-14,
+    )
+    assert any("Select at least two assets to optimize a portfolio" in item.value for item in app.info)
