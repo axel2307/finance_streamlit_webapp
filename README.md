@@ -101,6 +101,26 @@ cards plus optimal composition; **Risk** for correlations and return distributio
 **Optimization** for the frontier; and **Data** for observed prices, returns and CSVs.
 Chart markers use distinct shapes, outlines, text and numeric table counterparts.
 
+Optimization compares maximum Sharpe with global minimum variance (GMV) using
+their actual annual return, volatility and Sharpe ratio. The risk-free proxy is
+shown at zero modeled volatility. For a positive maximum Sharpe ratio, the
+**CAL — Maximum Sharpe** segment runs from `(0, annual RF)` to that risky
+portfolio's `(annual volatility, annual return)`. It represents theoretical
+cash/risky-portfolio mixtures from 0% to 100% invested in the risky portfolio;
+its slope is `(return - RF) / volatility`. There is no leveraged extension and
+no cash allocation or borrowing facility is implemented. Active exposure
+constraints do not imply a smooth tangency to the efficient frontier.
+
+For a nonpositive maximum Sharpe ratio, the CAL is omitted and the view explains
+that the proxy offers at least the risky portfolio's expected return with zero
+modeled volatility. Invalid or near-zero volatility prevents a CAL/Sharpe
+comparison with a controlled message; the display threshold is `1e-12` in annual
+fractional volatility, without changing the optimizer's acceptance criteria.
+**Show sample portfolios** only toggles the illustrative cloud. It does not
+resubmit analysis, alter pending settings, change a saved result or its CSVs.
+The chart uses a fresh `portfolio_charts_v2` import identity so an already-running
+process cannot reuse the prior plotting signature when receiving this entry point.
+
 Changing a control edits a draft without downloading prices or running the
 optimizer. Each submitted analysis stores its own settings, UTC completion time,
 validated data and result in the Streamlit session. If the draft differs, a

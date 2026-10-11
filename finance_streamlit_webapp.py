@@ -14,9 +14,10 @@ from finance_data import DataError, extract_close_prices, parse_catalog, prepare
 import portfolio_modes_v1 as portfolio
 from risk_free_irx_v1 import read_irx_quote
 from annual_moments_v1 import FREQUENCY_LABELS, PERIODS_PER_YEAR, annualize_returns
-from portfolio_charts_v1 import (
+from portfolio_charts_v2 import (
     plot_stock_prices, plot_normalized_prices, plot_correlation_matrix,
     plot_returns_kde_per_asset, plot_efficient_frontier_and_max_sharpe,
+    OptimizationViewError, optimization_comparison, capital_allocation_segment,
 )
 
 SNAPSHOT_KEY = 'analysis_snapshot_v1'
@@ -195,16 +196,34 @@ def render_optimization(snapshot):
         return
     st.markdown('### Efficient Frontier and Portfolio Optimization')
     annual = snapshot['annual']
-    plot_efficient_frontier_and_max_sharpe(
-        annual.mean_returns, annual.covariance, snapshot['risk_free_quote'].annual_simple_yield, solution)
-    st.caption('The star marks the maximum-Sharpe portfolio; the diamond marks minimum variance. '
-               'The line is the efficient frontier. Points are illustrative feasible portfolios.')
-    st.dataframe(pd.DataFrame({
-        'Portfolio': ['Maximum Sharpe (star)', 'Minimum variance (diamond)'],
-        'Annual return': [solution.max_return, solution.min_return],
-        'Annual volatility': [solution.max_risk, solution.min_risk],
-    }).style.format({'Annual return': '{:.2%}', 'Annual volatility': '{:.2%}'}),
+    annual_rf = snapshot['risk_free_quote'].annual_simple_yield
+    show_cloud = st.toggle('Show sample portfolios', value=True, key='optimization_show_cloud_v1',
+                           help='Change only the chart. Analyzed settings, results and downloads stay the same.')
+    try:
+        comparison = optimization_comparison(solution, annual_rf)
+        cal_segment = capital_allocation_segment(solution, annual_rf)
+        plot_efficient_frontier_and_max_sharpe(
+            annual.mean_returns, annual.covariance, annual_rf, solution, show_cloud=show_cloud)
+    except OptimizationViewError as exc:
+        st.warning(str(exc))
+        return
+    st.caption('The square marks the risk-free proxy; the star marks maximum Sharpe; '
+               'the diamond marks global minimum variance (GMV). '
+               'The frontier and the comparison use the analyzed exposure constraints.')
+    st.dataframe(comparison.style.format({
+        'Annual return': '{:.2%}', 'Annual volatility': '{:.2%}', 'Sharpe ratio': '{:.3f}'}),
         hide_index=True, width='stretch')
+    if cal_segment is None:
+        st.warning('The maximum Sharpe ratio is nonpositive. In this model, the risk-free proxy '
+                   'offers at least as much expected return with zero modeled volatility. '
+                   'The CAL is omitted; the risky portfolio is not a better cash alternative.')
+    else:
+        st.caption('CAL — Maximum Sharpe shows theoretical combinations of the risk-free proxy '
+                   'and this risky portfolio, from 0% to 100% in the risky portfolio. '
+                   'Its slope is the annual Sharpe ratio; the segment ends at the risky portfolio.')
+    st.caption('This reference does not change portfolio weights or implement a cash allocation, '
+               'borrowing at the proxy rate, or a leveraged extension. '
+               'Active portfolio constraints do not imply a smooth tangency to the frontier.')
 
 
 def render_data(snapshot):
