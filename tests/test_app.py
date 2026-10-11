@@ -114,7 +114,7 @@ def treasury_yield(layout="multiindex", value=4.2):
     if layout == "plain":
         return pd.DataFrame({"Close": [value]}, index=dates)
     columns = pd.MultiIndex.from_tuples(
-        [("Close", "^TNX")], names=["Price", "Ticker"]
+        [("Close", "^IRX")], names=["Price", "Ticker"]
     )
     return pd.DataFrame([[value]], index=dates, columns=columns)
 
@@ -151,7 +151,7 @@ def offline_app(monkeypatch, tmp_path):
 
     def download(*, tickers, period, interval, **kwargs):
         calls.append({"tickers": tickers, "period": period, "interval": interval})
-        if tickers == "^TNX":
+        if tickers == "^IRX":
             if isinstance(responses["yield"], Exception):
                 raise responses["yield"]
             return responses["yield"].copy()
@@ -280,8 +280,8 @@ def test_two_assets_complete_with_scalar_treasury_yield(offline_app, layout):
 
     assert_no_exception(app)
     assert not app.error
-    assert calls[-1] == {"tickers": "^TNX", "period": "1d", "interval": "1d"}
-    assert any("Risk Free Rate: 4.20%" in element.value for element in app.markdown)
+    assert calls[-1] == {"tickers": "^IRX", "period": "5d", "interval": "1d"}
+    assert any("annual simple investment yield): 4.304%" in element.value for element in app.markdown)
     assert any("Efficient Frontier and Portfolio Optimization" in element.value for element in app.markdown)
     metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
     assert len(metrics) == 1
@@ -314,17 +314,15 @@ def test_ambiguous_treasury_columns_preserve_valid_price_and_return_csvs(offline
     responses["yield"] = pd.concat([yield_data, yield_data], axis=1)
     if layout == "nested":
         responses["yield"].columns = pd.MultiIndex.from_tuples([
-            ("Close", "^TNX", "a"), ("Close", "^TNX", "b"),
+            ("Close", "^IRX", "a"), ("Close", "^IRX", "b"),
         ])
     prices = market_prices(["AAPL", "MSFT"])
     responses["prices"] = prices
     app = select_and_go(create_app(), ["AAPL", "MSFT"])
 
     assert_no_portfolio_results(app)
-    assert "The Treasury yield (^TNX) is unavailable. Please try again later." in [
-        element.value for element in app.error
-    ]
-    assert calls[-1]["tickers"] == "^TNX"
+    assert any("The Treasury bill proxy (^IRX) is unavailable:" in element.value for element in app.error)
+    assert calls[-1]["tickers"] == "^IRX"
     assert_valid_downloads_remain_available(app)
     expected_returns = prices["Close"].pct_change(fill_method=None).dropna()
     pd.testing.assert_frame_equal(
@@ -462,8 +460,8 @@ def test_weights_metrics_and_frontier_marker_describe_same_long_only_portfolio(o
     returns = downloaded_returns(app)
     expected_return = float(weights @ returns.mean().to_numpy())
     expected_risk = float(np.sqrt(weights @ returns.cov().to_numpy() @ weights))
-    # The established daily convention is preserved; this is not a methodology audit.
-    risk_free = (1 + 4.2 / 100) ** (1 / 365) - 1
+    # The IRX proxy is a simple return for the same daily interval as the assets.
+    risk_free = 0.042 / (360 - 91 * 0.042)
     metrics = [table.value for table in app.table if "Sharpe Ratio" in table.value.columns]
     assert len(metrics) == 1
     displayed = metrics[0].iloc[0]

@@ -43,8 +43,8 @@ uses Python's normal import locking; it does not reload or replace shared module
 Future incompatible optimizer interfaces should receive a new module identity.
 
 The pandas 3 startup fix preserves the valid ticker `NA` when reading CSV and
-removes missing labels before sorting. The Treasury-yield calculation extracts a
-scalar explicitly, which is required for pandas 3 and yfinance's MultiIndex data.
+removes missing labels before sorting. The Treasury-bill proxy extracts a dated
+scalar explicitly from Yahoo's plain or MultiIndex data.
 Direct dependencies are pinned to the versions used for this verification.
 
 ## Validated portfolio behavior
@@ -81,15 +81,43 @@ net and gross exposures. A 100% gross limit is equivalent to long-only.
   name the selected interval. Single-asset downloads and the literal ticker
   `NA` remain supported.
 
-This repair does not change the existing current-`^TNX` proxy, days/365 rate
-conversion, or per-interval return/volatility/Sharpe convention. Historical-rate
-alignment, annualization and visual redesign remain separate product decisions.
+The current `^IRX` proxy follows the simple-yield conversion below. Portfolio
+return, volatility and Sharpe remain expressed per selected interval.
+Historical-rate alignment, portfolio annualization and visual redesign remain
+separate product decisions.
 The app is educational and its estimates do not guarantee future performance.
 
 The regression suite covers the twelve reviewed defects: return retention and
 CSV dates (BUG01/02), usable data and covariance (BUG03/04), optimality and a shared
 long-only model (BUG05/06), solver failures and equal-mean frontiers (BUG07/08),
 provider errors (BUG09/10), KDE semantics (BUG11) and exchange identity (BUG12).
+
+## Risk-free proxy
+
+Yahoo Finance / yfinance is the only rate source. The app requests the last five
+daily observations of `^IRX` and uses the most recent dated, nonmissing `Close`
+**level**, expressed in percent; it never takes percentage changes of the index.
+The source, quote date and assumptions are displayed beside the results.
+Validated quotes are cached for up to one hour across selections and modes.
+Missing, ambiguous or invalid data stops portfolio analysis with an explanation
+while preserving the price and return CSVs; failures are not cached and there
+is no fallback rate.
+
+Let `d = quote / 100`. With an **assumed 91-day** bill maturity, the estimated
+annual simple investment yield is `y = 365*d / (360 - 91*d)`. For example, a
+4% bank-discount quote gives approximately 4.097% annual simple yield.
+This follows discount pricing on face value with a 360-day basis, then measures
+the gain against the purchase price on a 365-day basis
+([TreasuryDirect pricing](https://www.treasurydirect.gov/marketable-securities/understanding-pricing/)).
+The 91 days are a proxy assumption, not the bill's known remaining maturity;
+this is not an exact replication of DGS3MO or a historical rate series.
+
+`y` is **not an effective annual yield**. Its interval return is prorated as
+`y * days / 365`, using the app's existing day mapping: 1d = 1, 5d = 5,
+1mo = 30, 3mo = 90. No compounding exponent is applied. This rate is passed
+consistently to the optimizer, metrics and charts in both portfolio modes.
+Zero or negative observed quotes remain valid when the implied bill price is
+positive and the conversion is finite; missing quotes are never replaced by zero.
 
 ## Short-selling optimization
 
